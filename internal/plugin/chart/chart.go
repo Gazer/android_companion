@@ -48,7 +48,9 @@ type Plugin struct {
 	chartWidget *chartWidget
 	label       *widget.Label // shows last value + count
 	container   *fyne.Container
+	editBtn     *widget.Button
 	onClose     func()
+	onEdit      func()
 }
 
 // CompilePattern is kept for backward compatibility; use
@@ -82,9 +84,16 @@ func New(name, pattern string, onClose func()) (*Plugin, error) {
 	})
 	closeBtn.Importance = widget.LowImportance
 
+	p.editBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+		if p.onEdit != nil {
+			p.onEdit()
+		}
+	})
+	p.editBtn.Importance = widget.LowImportance
+
 	header := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		closeBtn,
+		container.NewHBox(p.editBtn, closeBtn),
 	)
 
 	body := container.NewBorder(nil, p.label, nil, nil,
@@ -100,6 +109,12 @@ func (p *Plugin) Name() string { return p.name }
 
 // Pattern returns the user pattern used to create this chart (for persistence).
 func (p *Plugin) Pattern() string { return p.pattern }
+
+// SetOnEdit sets the callback for the edit (pencil) button.
+func (p *Plugin) SetOnEdit(f func()) { p.onEdit = f }
+
+// SetOnClose sets the callback for the close button.
+func (p *Plugin) SetOnClose(f func()) { p.onClose = f }
 
 // Widget implements plugin.Plugin.
 func (p *Plugin) Widget() fyne.CanvasObject { return p.container }

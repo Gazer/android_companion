@@ -43,7 +43,9 @@ type Plugin struct {
 	badge     *canvas.Rectangle
 	label     *canvas.Text
 	container *fyne.Container
+	editBtn   *widget.Button
 	onClose   func()
+	onEdit    func()
 }
 
 // New creates a status plugin. rules are evaluated in order; the last
@@ -93,9 +95,16 @@ func New(name string, rules []Rule, onClose func()) (*Plugin, error) {
 	})
 	closeBtn.Importance = widget.LowImportance
 
+	p.editBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+		if p.onEdit != nil {
+			p.onEdit()
+		}
+	})
+	p.editBtn.Importance = widget.LowImportance
+
 	header := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		closeBtn,
+		container.NewHBox(p.editBtn, closeBtn),
 	)
 
 	badgeBox := container.NewGridWrap(fyne.NewSize(300, 48),
@@ -115,6 +124,12 @@ func (p *Plugin) Rules() []Rule {
 	copy(cp, p.rules)
 	return cp
 }
+
+// SetOnEdit sets the callback for the edit (pencil) button.
+func (p *Plugin) SetOnEdit(f func()) { p.onEdit = f }
+
+// SetOnClose sets the callback for the close button.
+func (p *Plugin) SetOnClose(f func()) { p.onClose = f }
 
 // Widget implements plugin.Plugin.
 func (p *Plugin) Widget() fyne.CanvasObject { return p.container }

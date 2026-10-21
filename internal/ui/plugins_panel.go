@@ -46,8 +46,12 @@ func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 	p.vbox = container.NewVBox(p.empty)
 	p.scroll = container.NewVScroll(p.vbox)
 
-	addChartBtn := widget.NewButtonWithIcon("Add chart", theme.ContentAddIcon(), p.showAddChartDialog)
-	addStatusBtn := widget.NewButtonWithIcon("Add status", theme.ContentAddIcon(), p.showAddStatusDialog)
+	addChartBtn := widget.NewButtonWithIcon("Add chart", theme.ContentAddIcon(), func() {
+		p.showChartDialog(nil)
+	})
+	addStatusBtn := widget.NewButtonWithIcon("Add status", theme.ContentAddIcon(), func() {
+		p.showStatusDialog(nil)
+	})
 
 	p.content = container.NewBorder(
 		container.NewHBox(addChartBtn, addStatusBtn),
@@ -118,15 +122,11 @@ func (p *PluginsPanel) loadSaved() {
 	if cfgs, err := plugin.LoadCharts(); err == nil {
 		for _, cfg := range cfgs {
 			cfg := cfg
-			var pl *chart.Plugin
-			pl, err := chart.New(cfg.Name, cfg.Pattern, func() {
-				p.registry.Remove(pl)
-				fyne.Do(func() { p.rebuild() })
-			})
+			pl, err := chart.New(cfg.Name, cfg.Pattern, nil)
 			if err != nil {
 				continue
 			}
-			p.registry.Add(pl)
+			p.addChart(pl)
 		}
 	}
 	if cfgs, err := plugin.LoadStatuses(); err == nil {
@@ -140,17 +140,39 @@ func (p *PluginsPanel) loadSaved() {
 					Color:   r.Color,
 				})
 			}
-			var pl *status.Plugin
-			pl, err := status.New(cfg.Name, rules, func() {
-				p.registry.Remove(pl)
-				fyne.Do(func() { p.rebuild() })
-			})
+			pl, err := status.New(cfg.Name, rules, nil)
 			if err != nil {
 				continue
 			}
-			p.registry.Add(pl)
+			p.addStatus(pl)
 		}
 	}
+}
+
+// addChart wires the plugin's close/edit callbacks and registers it.
+func (p *PluginsPanel) addChart(pl *chart.Plugin) {
+	pluginPtr := pl
+	pl.SetOnClose(func() {
+		p.registry.Remove(pluginPtr)
+		fyne.Do(func() { p.rebuild() })
+	})
+	pl.SetOnEdit(func() {
+		p.showChartDialog(pluginPtr)
+	})
+	p.registry.Add(pl)
+}
+
+// addStatus wires the plugin's close/edit callbacks and registers it.
+func (p *PluginsPanel) addStatus(pl *status.Plugin) {
+	pluginPtr := pl
+	pl.SetOnClose(func() {
+		p.registry.Remove(pluginPtr)
+		fyne.Do(func() { p.rebuild() })
+	})
+	pl.SetOnEdit(func() {
+		p.showStatusDialog(pluginPtr)
+	})
+	p.registry.Add(pl)
 }
 
 // SetWindow wires the parent window for dialogs.
@@ -178,17 +200,24 @@ func (p *PluginsPanel) rebuild() {
 	p.vbox.Refresh()
 }
 
-// showAddChartDialog opens the dialog to configure a new chart plugin.
-func (p *PluginsPanel) showAddChartDialog() {
+// showChartDialog opens the chart config dialog. If existing is non-nil,
+// the dialog is pre-filled and confirming replaces that plugin (edit mode).
+func (p *PluginsPanel) showChartDialog(existing *chart.Plugin) {
 	if p.window == nil {
 		return
 	}
 
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("Chart name (e.g. sr_perf_01)")
-
 	patternEntry := widget.NewEntry()
 	patternEntry.SetPlaceHolder("e.g. Session Replay telemetry: sr_perf_01={%d}ms")
+
+	title, confirm := "Add chart", "Add"
+	if existing != nil {
+		nameEntry.SetText(existing.Name())
+		patternEntry.SetText(existing.Pattern())
+		title, confirm = "Edit chart", "Save"
+	}
 
 	hint := widget.NewLabel("Use {%d} for integers, {%f} for decimals.\nEverything else must match literally.")
 	hint.Wrapping = fyne.TextWrapWord
@@ -201,7 +230,7 @@ func (p *PluginsPanel) showAddChartDialog() {
 		hint,
 	)
 
-	d := dialog.NewCustomConfirm("Add chart", "Add", "Cancel", form, func(ok bool) {
+	d := dialog.NewCustomConfirm(title, confirm, "Cancel", form, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -214,17 +243,15 @@ func (p *PluginsPanel) showAddChartDialog() {
 			return
 		}
 
-		var pl *chart.Plugin
-		var err error
-		pl, err = chart.New(name, pattern, func() {
-			p.registry.Remove(pl)
-			fyne.Do(func() { p.rebuild() })
-		})
+		pl, err := chart.New(name, pattern, nil)
 		if err != nil {
 			dialog.ShowError(err, p.window)
 			return
 		}
-		p.registry.Add(pl)
+		if existing != nil {
+			p.registry.Remove(existing)
+		}
+		p.addChart(pl)
 	}, p.window)
 	d.Resize(fyne.NewSize(500, 300))
 	d.Show()
@@ -239,12 +266,12 @@ type ruleRow struct {
 	box     *fyne.Container
 }
 
-func newRuleRow(onChange func()) *ruleRow {
+func newRuleRow(initial *status.Rule) *ruleRow {
 	r := &ruleRow{}
 	r.pattern = widget.NewEntry()
-	r.pattern.SetPlaceHolder("log substring")
+	r.pattern.SetPlaceHolder("log pattern, {%d} {%f} {%s} ok")
 	r.label = widget.NewEntry()
-	r.label.SetPlaceHolder("label")
+	r.label.SetPlaceHolder("label, $0 $1 ok")
 	r.color = widget.NewEntry()
 	r.color.SetPlaceHolder("#4CAF50")
 	r.swath = canvas.NewRectangle(theme.Color(theme.ColorNamePrimary))
@@ -256,9 +283,12 @@ func newRuleRow(onChange func()) *ruleRow {
 			r.swath.FillColor = c
 			r.swath.Refresh()
 		}
-		if onChange != nil {
-			onChange()
-		}
+	}
+
+	if initial != nil {
+		r.pattern.SetText(initial.Pattern)
+		r.label.SetText(initial.Label)
+		r.color.SetText(initial.Color)
 	}
 
 	r.box = container.NewBorder(nil, nil, nil, container.NewHBox(r.color, r.swath),
@@ -275,9 +305,9 @@ func (r *ruleRow) toRule() status.Rule {
 	}
 }
 
-// showAddStatusDialog opens the dialog to configure a status plugin
-// with N rules (pattern + label + color each).
-func (p *PluginsPanel) showAddStatusDialog() {
+// showStatusDialog opens the status config dialog. If existing is
+// non-nil, the dialog is pre-filled and confirming replaces it (edit).
+func (p *PluginsPanel) showStatusDialog(existing *status.Plugin) {
 	if p.window == nil {
 		return
 	}
@@ -285,24 +315,39 @@ func (p *PluginsPanel) showAddStatusDialog() {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("Status name (e.g. Session Replay)")
 
+	title, confirm := "Add status", "Add"
+	if existing != nil {
+		nameEntry.SetText(existing.Name())
+		title, confirm = "Edit status", "Save"
+	}
+
 	rulesBox := container.NewVBox()
 	var rows []*ruleRow
 	var dlg dialog.Dialog
 
-	addRow := func() {
-		row := newRuleRow(nil)
+	addRow := func(initial *status.Rule) {
+		row := newRuleRow(initial)
 		rows = append(rows, row)
 		rulesBox.Add(row.box)
 		rulesBox.Refresh()
-		// Grow the dialog so the new row is visible
 		if dlg != nil {
 			sz := dlg.MinSize()
 			dlg.Resize(fyne.NewSize(sz.Width, sz.Height+44))
 		}
 	}
-	addRow() // start with one row
 
-	addRuleBtn := widget.NewButtonWithIcon("Add rule", theme.ContentAddIcon(), addRow)
+	if existing != nil {
+		for _, r := range existing.Rules() {
+			r := r
+			addRow(&r)
+		}
+	} else {
+		addRow(nil) // start with one empty row
+	}
+
+	addRuleBtn := widget.NewButtonWithIcon("Add rule", theme.ContentAddIcon(), func() {
+		addRow(nil)
+	})
 
 	hint := widget.NewLabel("Each rule: when a log line matches the pattern, the badge\nswitches to that label + color.\nPatterns support {%d} {%f} {%s} captures; use $0, $1... in the label\nto show captured values.")
 	hint.Wrapping = fyne.TextWrapWord
@@ -320,7 +365,7 @@ func (p *PluginsPanel) showAddStatusDialog() {
 		hint,
 	)
 
-	d := dialog.NewCustomConfirm("Add status", "Add", "Cancel", form, func(ok bool) {
+	d := dialog.NewCustomConfirm(title, confirm, "Cancel", form, func(ok bool) {
 		dlg = nil
 		if !ok {
 			return
@@ -341,17 +386,15 @@ func (p *PluginsPanel) showAddStatusDialog() {
 			return
 		}
 
-		var pl *status.Plugin
-		var err error
-		pl, err = status.New(name, rules, func() {
-			p.registry.Remove(pl)
-			fyne.Do(func() { p.rebuild() })
-		})
+		pl, err := status.New(name, rules, nil)
 		if err != nil {
 			dialog.ShowError(err, p.window)
 			return
 		}
-		p.registry.Add(pl)
+		if existing != nil {
+			p.registry.Remove(existing)
+		}
+		p.addStatus(pl)
 	}, p.window)
 	dlg = d
 	d.Resize(fyne.NewSize(580, 400))
