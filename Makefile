@@ -27,5 +27,6 @@ tidy:
 clean:
 	rm -f $(BINARY)
 
-# Linux deps: sudo apt install libgl1-mesa-dev xorg-dev
-# macOS: no extra deps (uses system frameworks via cgo)
+# Linux deps: sudo apt install libgl1-mesa-dev xorg-dev libavcodec-dev libavutil-dev libswscale-dev pkg-config
+# macOS deps: brew install ffmpeg pkg-config
+# Without FFmpeg: go build -tags nomirror (no device mirroring)

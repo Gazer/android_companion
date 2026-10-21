@@ -8,36 +8,37 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// NavKey is an Android navigation button.
+type NavKey int
+
+const (
+	NavBack NavKey = iota + 1
+	NavHome
+	NavRecents
+)
+
 // NavBar is the row of Android navigation buttons shown under the
-// emulator screen: back, home, recents.
+// screen: back, home, recents.
 type NavBar struct {
 	widget.BaseWidget
 
-	onKey func(keyCode int32)
+	onKey func(NavKey)
 
 	row *fyne.Container
 }
 
-// Evdev key codes for Android navigation (same as the emulator's gRPC
-// sendKey expects with Evdev code type).
-const (
-	evdevKeyBack      = 158 // KEY_BACK
-	evdevKeyHome      = 172 // KEY_HOMEPAGE
-	evdevKeyAppSwitch = 580 // KEY_APPSELECT (recents)
-)
-
-// NewNavBar creates the bar. onKey receives evdev key codes.
-func NewNavBar(onKey func(keyCode int32)) *NavBar {
+// NewNavBar creates the bar.
+func NewNavBar(onKey func(NavKey)) *NavBar {
 	n := &NavBar{onKey: onKey}
 
 	back := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
-		n.press(evdevKeyBack)
+		n.press(NavBack)
 	})
 	home := widget.NewButtonWithIcon("", theme.HomeIcon(), func() {
-		n.press(evdevKeyHome)
+		n.press(NavHome)
 	})
 	recents := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
-		n.press(evdevKeyAppSwitch)
+		n.press(NavRecents)
 	})
 
 	n.row = container.NewHBox(
@@ -50,9 +51,9 @@ func NewNavBar(onKey func(keyCode int32)) *NavBar {
 	return n
 }
 
-func (n *NavBar) press(code int32) {
+func (n *NavBar) press(k NavKey) {
 	if n.onKey != nil {
-		n.onKey(code)
+		n.onKey(k)
 	}
 }
 
@@ -61,8 +62,8 @@ func (n *NavBar) Content() fyne.CanvasObject {
 	return n.row
 }
 
-// SetOnKey sets the callback receiving evdev key codes.
-func (n *NavBar) SetOnKey(f func(keyCode int32)) {
+// SetOnKey sets the callback for the buttons.
+func (n *NavBar) SetOnKey(f func(NavKey)) {
 	n.onKey = f
 }
 

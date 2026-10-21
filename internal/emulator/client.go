@@ -34,7 +34,7 @@ func Connect(ctx context.Context, port int) (*Client, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 		// Screenshots can be large: a 2208x1840 RGB888 frame is ~12MB.
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64 * 1024 * 1024)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024*1024)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial emulator grpc: %w", err)
@@ -115,6 +115,14 @@ func (c *Client) SendKey(ctx context.Context, keyCode int32) error {
 // SendText sends printable characters (simpler and more reliable than raw keycodes).
 func (c *Client) SendText(ctx context.Context, text string) error {
 	ev := &pb.KeyboardEvent{Text: text}
+	_, err := c.ctrl.SendKey(ctx, ev)
+	return err
+}
+
+// SendKeyName presses a key given its W3C name ("Enter", "Backspace",
+// "ArrowUp", "GoBack"...).
+func (c *Client) SendKeyName(ctx context.Context, key string) error {
+	ev := &pb.KeyboardEvent{EventType: pb.KeyboardEvent_keypress, Key: key}
 	_, err := c.ctrl.SendKey(ctx, ev)
 	return err
 }

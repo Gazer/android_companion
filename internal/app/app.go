@@ -79,21 +79,12 @@ func Run(parentCtx context.Context, cfg Config) error {
 		go sess.stop("")
 	})
 
-	// Wire emulator input to gRPC
-	mw.Emulator().SetTapHandler(func(x, y int) {
-		sess.sendMouse(x, y, 1)
-		sess.sendMouse(x, y, 0)
-	})
-	mw.Emulator().SetDragHandler(func(x, y int) {
-		sess.sendMouse(x, y, 1)
-	})
-	mw.Emulator().SetReleaseHandler(func() {
-		sess.sendMouseRelease()
-	})
-
-	// Wire navigation bar (back/home/recents) to gRPC sendKey
-	mw.NavBar().SetOnKey(func(code int32) {
-		sess.sendKey(code)
+	// The screen widget's input goes to the session's backend (set when a
+	// session starts); the navigation bar too.
+	mw.NavBar().SetOnKey(func(k ui.NavKey) {
+		if b := sess.currentScreen(); b != nil {
+			b.Nav(k)
+		}
 	})
 
 	// Clean shutdown when window closes: stops the streams and kills the
@@ -133,12 +124,17 @@ type session struct {
 	busy     bool
 	inst     *avd.Instance // only for emulators we launched
 	emu      *emulator.Client
+	screen   screenBackend // nil when the screen isn't shown
 	streamer *logcat.Streamer
 	cancel   context.CancelFunc
 	// lastDevice identifies the device whose logs are in the store.
 	lastDevice string
-	lastX      int
-	lastY      int
+}
+
+func (s *session) currentScreen() screenBackend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.screen
 }
 
 // loadAVDs fills the picker's emulator section.
@@ -301,15 +297,19 @@ func (s *session) launchEmulator(ctx context.Context, t ui.Target) error {
 	if err != nil {
 		return fmt.Errorf("grpc: %w", err)
 	}
+	backend := newEmulatorScreen(emu)
 	s.mu.Lock()
 	s.emu = emu
+	s.screen = backend
 	s.mu.Unlock()
 
 	if err := s.startLogs(ctx, inst.Serial, "avd:"+t.ID, t.Title); err != nil {
 		return err
 	}
 	fyne.Do(func() {
-		s.mw.ShowEmulator(t.Title)
+		s.mw.Screen().Clear()
+		s.mw.Screen().SetInput(backend)
+		s.mw.ShowScreen(t.Title, true)
 	})
 	go s.pumpFrames(ctx, emu)
 	return nil
@@ -332,11 +332,36 @@ func (s *session) connectDevice(ctx context.Context, t ui.Target) error {
 	if err := s.startLogs(ctx, t.ID, t.ID, title); err != nil {
 		return err
 	}
+	mirrorErr := s.startMirroring(ctx, t.ID, title, details)
 	fyne.Do(func() {
 		s.mw.SetTitle("Android Companion — " + title)
-		s.mw.ShowDevice(title, details)
+		if mirrorErr != nil {
+			s.mw.ShowDevice(title, details, "Screen mirroring unavailable: "+mirrorErr.Error())
+		} else {
+			s.mw.ShowScreen(title, false)
+		}
 	})
 	return nil
+}
+
+// mirroringStopped shows the device summary when mirroring stops while the
+// device is still connected (e.g. the scrcpy server crashed).
+func (s *session) mirroringStopped(ctx context.Context, backend screenBackend, title string, details []string, err error) {
+	s.mu.Lock()
+	if s.screen != backend {
+		s.mu.Unlock()
+		return
+	}
+	s.screen = nil
+	s.mu.Unlock()
+	backend.Close()
+	fyne.Do(func() {
+		if ctx.Err() != nil {
+			return
+		}
+		s.mw.Screen().SetInput(nil)
+		s.mw.ShowDevice(title, details, "Screen mirroring stopped: "+err.Error())
+	})
 }
 
 // startLogs streams the device's logcat into the store and the plugins.
@@ -422,7 +447,7 @@ func (s *session) pumpFrames(ctx context.Context, emu *emulator.Client) {
 					hasPending.Store(false)
 					frameMu.Unlock()
 					fyne.Do(func() {
-						s.mw.Emulator().SetFrame(f)
+						s.mw.Screen().SetFrame(f)
 					})
 				} else {
 					frameMu.Unlock()
@@ -443,7 +468,8 @@ func (s *session) pumpFrames(ctx context.Context, emu *emulator.Client) {
 func (s *session) stop(reason string) {
 	s.shutdown()
 	fyne.Do(func() {
-		s.mw.Emulator().Clear()
+		s.mw.Screen().SetInput(nil)
+		s.mw.Screen().Clear()
 		s.mw.ShowPicker()
 		s.mw.SetTitle("Android Companion")
 		s.mw.Picker().SetStatus(reason)
@@ -489,42 +515,12 @@ func (s *session) connect(ctx context.Context, addr string) error {
 	return nil
 }
 
-func (s *session) sendMouse(x, y int, buttons int32) {
-	s.mu.Lock()
-	emu := s.emu
-	s.lastX, s.lastY = x, y
-	s.mu.Unlock()
-	if emu != nil {
-		_ = emu.SendMouse(context.Background(), int32(x), int32(y), buttons)
-	}
-}
-
-func (s *session) sendMouseRelease() {
-	s.mu.Lock()
-	emu := s.emu
-	x, y := s.lastX, s.lastY
-	s.mu.Unlock()
-	if emu != nil {
-		_ = emu.SendMouse(context.Background(), int32(x), int32(y), 0)
-	}
-}
-
-// sendKey forwards an evdev key code (navigation buttons) to the emulator.
-func (s *session) sendKey(code int32) {
-	s.mu.Lock()
-	emu := s.emu
-	s.mu.Unlock()
-	if emu != nil {
-		_ = emu.SendKey(context.Background(), code)
-	}
-}
-
 // shutdown stops the streams and kills the emulator we launched, if any.
 // Physical devices are never touched. Idempotent.
 func (s *session) shutdown() {
 	s.mu.Lock()
-	cancel, streamer, emu, inst := s.cancel, s.streamer, s.emu, s.inst
-	s.cancel, s.streamer, s.emu, s.inst = nil, nil, nil, nil
+	cancel, streamer, screen, emu, inst := s.cancel, s.streamer, s.screen, s.emu, s.inst
+	s.cancel, s.streamer, s.screen, s.emu, s.inst = nil, nil, nil, nil, nil
 	s.busy = false
 	s.mu.Unlock()
 
@@ -533,6 +529,9 @@ func (s *session) shutdown() {
 	}
 	if streamer != nil {
 		streamer.Stop()
+	}
+	if screen != nil {
+		screen.Close()
 	}
 	if emu != nil {
 		emu.Close()

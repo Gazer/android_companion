@@ -16,12 +16,12 @@ import (
 type MainWindow struct {
 	window fyne.Window
 
-	split    *container.Split
-	picker   *PickerPanel
-	emulator *EmulatorWidget
-	navbar   *NavBar
-	logcat   *LogcatPanel
-	plugins  *PluginsPanel
+	split   *container.Split
+	picker  *PickerPanel
+	screen  *ScreenWidget
+	navbar  *NavBar
+	logcat  *LogcatPanel
+	plugins *PluginsPanel
 
 	pluginsVisible bool
 	toggleBtn      *widget.Button
@@ -36,7 +36,7 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 	mw := &MainWindow{window: win, pluginsVisible: true}
 
 	mw.picker = NewPickerPanel(nil) // onSelect wired later by app
-	mw.emulator = NewEmulatorWidget()
+	mw.screen = NewScreenWidget()
 	mw.navbar = NewNavBar(nil) // onKey wired later by app
 	mw.logcat = NewLogcatPanel(store)
 	mw.plugins = NewPluginsPanel(registry)
@@ -73,8 +73,8 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 // Picker returns the picker panel.
 func (mw *MainWindow) Picker() *PickerPanel { return mw.picker }
 
-// Emulator returns the emulator widget.
-func (mw *MainWindow) Emulator() *EmulatorWidget { return mw.emulator }
+// Screen returns the screen widget (emulator or mirrored device).
+func (mw *MainWindow) Screen() *ScreenWidget { return mw.screen }
 
 // NavBar returns the navigation bar.
 func (mw *MainWindow) NavBar() *NavBar { return mw.navbar }
@@ -104,33 +104,40 @@ func (mw *MainWindow) togglePlugins() {
 // Logcat returns the logcat panel.
 func (mw *MainWindow) Logcat() *LogcatPanel { return mw.logcat }
 
-// ShowEmulator switches the left panel from the picker to the emulator
-// view: a bar with the AVD name and a Stop button, the screen, and the
-// navigation bar (back/home/recents) below it.
-func (mw *MainWindow) ShowEmulator(title string) {
-	bar := mw.sessionBar(title, "Stop", theme.MediaStopIcon())
-	mw.split.Leading = container.NewBorder(bar, mw.navbar.Content(), nil, nil, mw.emulator)
+// ShowScreen switches the left panel from the picker to the screen view:
+// a bar with the name and the Stop (emulator) or Disconnect (device)
+// button, the screen, and the navigation bar (back/home/recents) below.
+func (mw *MainWindow) ShowScreen(title string, emulator bool) {
+	bar := mw.emulatorOrDeviceBar(title, emulator)
+	mw.split.Leading = container.NewBorder(bar, mw.navbar.Content(), nil, nil, mw.screen)
 	mw.split.Refresh()
 }
 
 // ShowDevice switches the left panel from the picker to a connected
-// device's summary. There's no screen mirroring for devices (yet): logs
-// and plugins work as with an emulator.
-func (mw *MainWindow) ShowDevice(title string, details []string) {
-	bar := mw.sessionBar(title, "Disconnect", theme.LogoutIcon())
+// device's summary, used when its screen can't be mirrored: note says why.
+// Logs and plugins work anyway.
+func (mw *MainWindow) ShowDevice(title string, details []string, note string) {
+	bar := mw.emulatorOrDeviceBar(title, false)
 
 	name := widget.NewLabel(title)
 	name.TextStyle = fyne.TextStyle{Bold: true}
 	name.Alignment = fyne.TextAlignCenter
 	info := widget.NewLabel(strings.Join(details, "\n"))
 	info.Alignment = fyne.TextAlignCenter
-	note := widget.NewLabel("Screen mirroring is only available for emulators.\nLogs and plugins work as usual.")
-	note.Alignment = fyne.TextAlignCenter
-	note.SizeName = theme.SizeNameCaptionText
+	noteLabel := widget.NewLabel(note + "\nLogs and plugins work as usual.")
+	noteLabel.Alignment = fyne.TextAlignCenter
+	noteLabel.SizeName = theme.SizeNameCaptionText
 
-	body := container.NewCenter(container.NewVBox(name, info, widget.NewSeparator(), note))
+	body := container.NewCenter(container.NewVBox(name, info, widget.NewSeparator(), noteLabel))
 	mw.split.Leading = container.NewBorder(bar, nil, nil, nil, body)
 	mw.split.Refresh()
+}
+
+func (mw *MainWindow) emulatorOrDeviceBar(title string, emulator bool) fyne.CanvasObject {
+	if emulator {
+		return mw.sessionBar(title, "Stop", theme.MediaStopIcon())
+	}
+	return mw.sessionBar(title, "Disconnect", theme.LogoutIcon())
 }
 
 // sessionBar is the top bar of the emulator/device views.

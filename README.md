@@ -1,8 +1,8 @@
 # Android Companion
 
-A desktop app that launches an Android emulator **embedded inside the window**, or connects to a **physical device over USB or Wi-Fi**, with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
+A desktop app that launches an Android emulator **embedded inside the window**, or mirrors a **physical device over USB or Wi-Fi**, with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
 
-Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator).
+Built with **Go + Fyne**. Emulators use their **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator); physical devices are mirrored with an embedded **[scrcpy](https://github.com/Genymobile/scrcpy) server**, decoded with **FFmpeg**.
 
 ![screenshot](screenshot.png)
 
@@ -12,15 +12,17 @@ Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism 
 
 - Picker with the connected devices (USB, Wi-Fi, running emulators) and the AVDs to launch; it refreshes as devices come and go
 - Pair a device over Wi-Fi with a pairing code (Android 11+), or `adb connect` to it
-- Physical devices get logs and plugins; screen mirroring is only available for emulators
 - If the device disconnects, the app goes back to the picker and keeps its logs
 - Pass `-avd <name>` or `-serial <serial>` to skip the picker
 
-### Emulator
+### Screen
 
-- Click, tap and drag directly on the emulator screen
+- Emulators run embedded; physical devices are mirrored (up to 60 fps, 1280 px), Android 5.0+
+- Click, tap and drag on the screen; mouse wheel / trackpad scrolling on devices
+- Click the screen to type into it: text, Enter, Backspace, arrows, Tab, Esc (back); Cmd/Ctrl+V pastes
 - On-screen back / home / recents buttons
-- Stop button, back to the picker; closing the window also kills the emulator
+- Stop / Disconnect button, back to the picker; closing the window also kills the emulator (devices are left alone)
+- If mirroring isn't possible, the device still gets logs and plugins
 
 ### Logcat
 
@@ -58,19 +60,41 @@ pattern: buffering at {%d}%
 label:   Buffering $0%     -> badge shows "Buffering 42%"
 ```
 
-## Requirements
+## Install
 
-- Go 1.22+
-- `adb`, from the Android SDK platform-tools (`ANDROID_HOME` respected) or in `PATH`
-- To launch emulators: the Android Emulator SDK package and at least one AVD
-- **Linux**: `sudo apt install libgl1-mesa-dev xorg-dev`
-- **macOS**: no extra deps
-- For regenerating protobufs: `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`
+### 1. Requirements
 
-## Build & Run
+| | macOS | Linux (Debian / Ubuntu) |
+|---|---|---|
+| Go 1.25+ | `brew install go` | [go.dev/dl](https://go.dev/dl) |
+| C compiler (cgo) | `xcode-select --install` | `sudo apt install build-essential` |
+| OpenGL / X11 (Fyne) | — | `sudo apt install libgl1-mesa-dev xorg-dev` |
+| FFmpeg + pkg-config (device mirroring) | `brew install ffmpeg pkg-config` | `sudo apt install libavcodec-dev libavutil-dev libswscale-dev pkg-config` |
+| `adb` | Android Studio's SDK, or `brew install --cask android-platform-tools` | Android Studio's SDK, or `sudo apt install adb` |
+
+- **adb** is the only Android tool that's required. It's taken from the Android SDK (`ANDROID_HOME` / `ANDROID_SDK_ROOT`, or the default `~/Library/Android/sdk` / `~/Android/Sdk`), or from `PATH`.
+- **Emulators** (optional) need the Android Emulator SDK package and at least one AVD (create them in Android Studio's Device Manager).
+- **FFmpeg** is linked dynamically (tested with FFmpeg 8.1), so it must also be installed where the app runs. Without it, build with `-tags nomirror`: devices still get logs and plugins, without their screen.
+
+### 2. Build
 
 ```sh
-make build
+git clone https://github.com/Gazer/android_companion.git
+cd android_companion
+make build                                          # or: go build -o android-companion .
+go build -tags nomirror -o android-companion .      # alternative: without FFmpeg
+```
+
+### 3. Prepare your device (physical devices only)
+
+- Enable **Developer options** and **USB debugging**, plug the device in and accept the debugging prompt.
+- **Wi-Fi** (Android 11+): turn on **Wireless debugging**, then use **Pair device over Wi-Fi…** in the app's picker.
+- Some Xiaomi devices also need **USB debugging (Security settings)** for input to work.
+- **Linux**: your user must be in the `plugdev` group, with udev rules for the device (`sudo apt install android-sdk-platform-tools-common`).
+
+## Run
+
+```sh
 ./android-companion                         # in-app picker
 ./android-companion -avd Pixel_8            # launch an AVD, skip picker
 ./android-companion -avd Pixel_8 -wipe      # cold boot with data wipe
@@ -86,6 +110,8 @@ go test ./...
 ## Project layout
 
 - `internal/adb` — device list, device info, Wi-Fi pairing
+- `internal/scrcpy` — embedded scrcpy server (v4.0): start/stop, video stream, input messages
+- `internal/video` — H.264 decoding with FFmpeg (cgo) and frame buffering
 - `internal/avd` — SDK discovery, AVD list, emulator process
 - `internal/emulator` — gRPC client for the emulator controller
 - `internal/logcat` — `adb logcat` parser and in-memory store
@@ -99,7 +125,7 @@ go test ./...
 make proto
 ```
 
-The proto file is copied from `$ANDROID_HOME/emulator/lib/emulator_controller.proto`.
+Needs `protoc`, `protoc-gen-go` and `protoc-gen-go-grpc`. The proto file is copied from `$ANDROID_HOME/emulator/lib/emulator_controller.proto`.
 
 ## Cross-compilation
 
@@ -112,6 +138,10 @@ GOOS=linux go build -o android-companion-linux .
 # On macOS
 GOOS=darwin go build -o android-companion-darwin .
 ```
+
+## Third-party
+
+`internal/scrcpy/scrcpy-server-v4.0` is the server of [scrcpy](https://github.com/Genymobile/scrcpy) v4.0 by Genymobile and Romain Vimont, distributed under the Apache License 2.0 (`internal/scrcpy/LICENSE`).
 
 ---
 
