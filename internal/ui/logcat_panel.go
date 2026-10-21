@@ -3,7 +3,6 @@ package ui
 import (
 	"math"
 	"strconv"
-	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -49,7 +48,7 @@ type LogcatPanel struct {
 	// previous runs of the app stay visible after it restarts.
 	pkg        string
 	pkgPIDs    map[int32]struct{}
-	filter     string // lower case
+	filter     textFilter
 	mapVersion uint64
 
 	// nextSeq is the store sequence number of the next entry to read.
@@ -94,19 +93,20 @@ func NewLogcatPanel(store *logcat.Store) *LogcatPanel {
 	p.metrics = newLogMetrics(base.Size(theme.SizeNameText))
 	p.builder = newRowBuilder(p.metrics)
 
+	// The last package and text filter are saved, and restored below.
+	prefs := fyne.CurrentApp().Preferences()
+
 	p.packageFilter = NewPackageFilter(func(pkg string) {
-		p.pkg = pkg
-		p.pkgPIDs = nil
-		if pkg != "" {
-			p.pkgPIDs = store.PIDsForPackage(pkg)
-		}
+		prefs.SetString(prefPackage, pkg)
+		p.setPackage(pkg)
 		p.rebuild()
 	})
 
 	p.filterEntry = widget.NewEntry()
-	p.filterEntry.SetPlaceHolder("Filter text...")
+	p.filterEntry.SetPlaceHolder(`Filter: words, ~exclude, "a phrase"`)
 	p.filterEntry.OnChanged = func(s string) {
-		p.filter = strings.ToLower(s)
+		prefs.SetString(prefFilter, s)
+		p.filter = parseTextFilter(s)
 		p.rebuild()
 	}
 
@@ -135,9 +135,32 @@ func NewLogcatPanel(store *logcat.Store) *LogcatPanel {
 		),
 	)
 
+	// Restore the last package and filter. SetText runs OnChanged, which
+	// parses the filter and loads the (still empty) list.
+	if pkg := prefs.String(prefPackage); pkg != "" {
+		p.packageFilter.SetSelected(pkg)
+		p.setPackage(pkg)
+	}
+	p.filterEntry.SetText(prefs.String(prefFilter))
+
 	p.updateStatus()
 	p.ExtendBaseWidget(p)
 	return p
+}
+
+// Preference keys of the last package and text filter.
+const (
+	prefPackage = "logcat.package"
+	prefFilter  = "logcat.filter"
+)
+
+// setPackage sets the package filter ("" for all packages).
+func (p *LogcatPanel) setPackage(pkg string) {
+	p.pkg = pkg
+	p.pkgPIDs = nil
+	if pkg != "" {
+		p.pkgPIDs = p.store.PIDsForPackage(pkg)
+	}
 }
 
 // Content returns the panel's UI tree.
@@ -196,7 +219,7 @@ func (p *LogcatPanel) matches(e *logcat.Entry) bool {
 			return false
 		}
 	}
-	return containsFold(e.Raw, p.filter)
+	return p.filter.match(e.Raw)
 }
 
 // rebuild re-filters the whole store and jumps to the newest log.
@@ -431,10 +454,7 @@ func (p *LogcatPanel) Clear() {
 // (and was cleared). The package filter is kept, but the PIDs collected
 // for it belonged to the previous device.
 func (p *LogcatPanel) ResetDevice() {
-	p.pkgPIDs = nil
-	if p.pkg != "" {
-		p.pkgPIDs = p.store.PIDsForPackage(p.pkg)
-	}
+	p.setPackage(p.pkg)
 	p.mapVersion = p.store.MapVersion()
 	p.refreshPackages()
 	p.rebuild()

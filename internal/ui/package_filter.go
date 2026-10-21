@@ -54,10 +54,19 @@ func (p *PackageFilter) Selected() string {
 
 // Clear resets the selection.
 func (p *PackageFilter) Clear() {
+	p.SetSelected("")
+}
+
+// SetSelected shows pkg as the selection, without calling onSelect.
+func (p *PackageFilter) SetSelected(pkg string) {
 	p.mu.Lock()
-	p.selected = ""
+	p.selected = pkg
 	p.mu.Unlock()
-	p.button.SetText("Select package...")
+	if pkg == "" {
+		p.button.SetText("Select package...")
+	} else {
+		p.button.SetText(pkg)
+	}
 }
 
 // Content returns the widget's UI tree (just the button).

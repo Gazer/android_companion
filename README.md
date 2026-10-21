@@ -26,7 +26,8 @@ Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism 
 
 - Android Studio look: aligned columns, colored tags and severity levels
 - Multi-line messages
-- Package picker plus free-text filter
+- Package picker plus free-text filter: space-separated terms that must all match, `~term` hides lines containing `term`, `"a phrase"` keeps spaces, `\~` for a literal `~` (e.g. `error ~Choreographer ~gc`)
+- The last package and filter are restored on the next start
 - Auto-scroll that stops when you scroll up and resumes with a jump-to-bottom button
 - Horizontal scrolling for long lines
 - The log keeps up even on chatty apps: only visible rows are rendered

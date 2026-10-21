@@ -160,6 +160,77 @@ func TestLogcatPanelTextFilter(t *testing.T) {
 	if len(p.rows) != 30 {
 		t.Fatalf("rows after clearing the filter = %d, want 30", len(p.rows))
 	}
+
+	// "~text" excludes, also for new logs.
+	p.filterEntry.SetText("~Alpha")
+	if len(p.rows) != 15 {
+		t.Fatalf("rows with ~Alpha = %d, want 15", len(p.rows))
+	}
+	for _, r := range p.rows {
+		if strings.Contains(r.msg, "alpha") {
+			t.Fatalf("~Alpha kept %q", r.msg)
+		}
+	}
+	logs.add(3, "alpha")
+	logs.add(2, "gamma")
+	p.RefreshDisplay()
+	if len(p.rows) != 17 {
+		t.Fatalf("rows with ~Alpha after new logs = %d, want 17", len(p.rows))
+	}
+
+	// A lone "~" filters nothing.
+	p.filterEntry.SetText("~")
+	if len(p.rows) != 35 {
+		t.Fatalf("rows with ~ = %d, want 35", len(p.rows))
+	}
+
+	// Several terms: all must match (anywhere in the line, tag included).
+	p.filterEntry.SetText("~alpha ~gamma")
+	if len(p.rows) != 15 {
+		t.Fatalf("rows with ~alpha ~gamma = %d, want 15 (only beta)", len(p.rows))
+	}
+	p.filterEntry.SetText("MyTag beta")
+	if len(p.rows) != 15 {
+		t.Fatalf("rows with 'MyTag beta' = %d, want 15", len(p.rows))
+	}
+	p.filterEntry.SetText("beta gamma")
+	if len(p.rows) != 0 {
+		t.Fatalf("rows with 'beta gamma' = %d, want 0", len(p.rows))
+	}
+}
+
+func TestLogcatPanelRestoresPackageAndFilter(t *testing.T) {
+	a := test.NewTempApp(t)
+	store := logcat.NewStore("", "")
+
+	// Changes are saved...
+	p := NewLogcatPanel(store)
+	p.filterEntry.SetText("error ~gc")
+	p.packageFilter.onSelect("com.example.app")
+	prefs := a.Preferences()
+	if got := prefs.String(prefFilter); got != "error ~gc" {
+		t.Fatalf("saved filter = %q", got)
+	}
+	if got := prefs.String(prefPackage); got != "com.example.app" {
+		t.Fatalf("saved package = %q", got)
+	}
+
+	// ...and restored by the next panel (i.e. on the next start).
+	p2 := NewLogcatPanel(store)
+	if p2.filterEntry.Text != "error ~gc" || len(p2.filter.include) != 1 || len(p2.filter.exclude) != 1 {
+		t.Fatalf("filter not restored: entry %q, parsed %+v", p2.filterEntry.Text, p2.filter)
+	}
+	if p2.pkg != "com.example.app" || p2.packageFilter.Selected() != "com.example.app" ||
+		p2.packageFilter.button.Text != "com.example.app" {
+		t.Fatalf("package not restored: pkg %q, selected %q, button %q",
+			p2.pkg, p2.packageFilter.Selected(), p2.packageFilter.button.Text)
+	}
+
+	// "Clear (show all)" is saved too.
+	p2.packageFilter.onSelect("")
+	if got := prefs.String(prefPackage); got != "" {
+		t.Fatalf("saved package after clearing = %q", got)
+	}
 }
 
 func TestLogcatPanelTrimsOldRows(t *testing.T) {
