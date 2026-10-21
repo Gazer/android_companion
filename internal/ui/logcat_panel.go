@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,111 +16,14 @@ import (
 )
 
 const (
-	// maxDisplayedEntries caps how many items the list widget handles.
+	// maxDisplayedEntries caps how many items the list handles.
 	maxDisplayedEntries = 1000
+	// logRowHeight is the fixed pixel height of one log line.
+	logRowHeight = 20
 )
 
-// wideList wraps a CanvasObject (the list+interceptor) and overrides
-// MinSize to report the full width needed by the longest visible row, so
-// an outer horizontal scroller can actually scroll. The List itself
-// always clamps rows to its own width, so we resize it ourselves.
-type wideList struct {
-	widget.BaseWidget
-	content  fyne.CanvasObject
-	minWidth float32
-}
-
-func newWideList(content fyne.CanvasObject) *wideList {
-	w := &wideList{content: content, minWidth: 0}
-	w.ExtendBaseWidget(w)
-	return w
-}
-
-// setMinWidth updates the reported content width and resizes the list if
-// it exceeds the visible area. Called when displayed entries change.
-func (w *wideList) setMinWidth(width float32) {
-	w.minWidth = width
-	cur := w.Size()
-	if width > cur.Width {
-		w.Resize(fyne.NewSize(width, cur.Height))
-	}
-	w.Refresh()
-}
-
-func (w *wideList) CreateRenderer() fyne.WidgetRenderer {
-	return &wideListRenderer{w: w}
-}
-
-type wideListRenderer struct {
-	w *wideList
-}
-
-func (r *wideListRenderer) Layout(size fyne.Size) {
-	w := size.Width
-	if r.w.minWidth > w {
-		w = r.w.minWidth
-	}
-	r.w.content.Resize(fyne.NewSize(w, size.Height))
-}
-
-func (r *wideListRenderer) MinSize() fyne.Size {
-	s := r.w.content.MinSize()
-	if r.w.minWidth > s.Width {
-		s.Width = r.w.minWidth
-	}
-	return s
-}
-
-func (r *wideListRenderer) Refresh() {
-	r.w.content.Refresh()
-}
-
-func (r *wideListRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.w.content}
-}
-
-func (r *wideListRenderer) Destroy() {}
-
-// scrollInterceptor wraps the List to detect user scrolls by observing
-// offset changes between refresh ticks: a decrease means the user scrolled
-// up (we never scroll up programmatically), which pauses auto-scroll.
-type scrollInterceptor struct {
-	widget.BaseWidget
-	list       *widget.List
-	lastOffset float32
-	onUserUp   func()
-}
-
-func newScrollInterceptor(list *widget.List, onUserUp func()) *scrollInterceptor {
-	s := &scrollInterceptor{list: list, onUserUp: onUserUp}
-	s.ExtendBaseWidget(s)
-	return s
-}
-
-// check compares the current offset to the last known one. We call it
-// right after applying our own ScrollToBottom, so lastOffset always
-// reflects the settled position; any later decrease can only come from
-// the user.
-func (s *scrollInterceptor) check() {
-	off := s.list.GetScrollOffset()
-	if off < s.lastOffset-1 && s.onUserUp != nil {
-		s.onUserUp()
-	}
-	s.lastOffset = off
-}
-
-// sync updates lastOffset to the current position without triggering
-// detection. Call right after a programmatic ScrollToBottom.
-func (s *scrollInterceptor) sync() {
-	s.lastOffset = s.list.GetScrollOffset()
-}
-
-func (s *scrollInterceptor) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(s.list)
-}
-
 // LogcatPanel is the right-side panel with package filter, text filter,
-// and a scrollable virtualized log list with Android Studio-style colors.
+// and a scrollable (both axes) virtualized log list.
 type LogcatPanel struct {
 	widget.BaseWidget
 
@@ -133,19 +37,21 @@ type LogcatPanel struct {
 	// UI widgets
 	packageFilter *PackageFilter
 	filterEntry   *widget.Entry
-	list          *widget.List
-	scroller      *scrollInterceptor
-	wide          *wideList
+	vlist         *vList
+	scroll        *container.Scroll
 	bottomBtn     *widget.Button
 	listArea      *fyne.Container
 	statusLabel   *widget.Label
 
 	autoScroll bool
+	// lastOffsetY tracks the scroll offset to detect user scrolls
+	lastOffsetY float32
 
 	// Track last state to avoid unnecessary rebuilds
 	lastCount   int
 	lastFilter  string
 	lastPackage string
+	lastFullW   float32
 }
 
 // NewLogcatPanel creates the panel.
@@ -170,7 +76,9 @@ func NewLogcatPanel(store *logcat.Store) *LogcatPanel {
 
 	p.statusLabel = widget.NewLabel("Select a package to view logs")
 
-	p.list = widget.NewList(
+	// Virtualized list inside a bidirectional Scroll: one scroller handles
+	// both axes, so trackpad horizontal gestures work everywhere.
+	p.vlist = newVList(logRowHeight,
 		func() int {
 			p.mu.RLock()
 			defer p.mu.RUnlock()
@@ -179,50 +87,37 @@ func NewLogcatPanel(store *logcat.Store) *LogcatPanel {
 		func() fyne.CanvasObject {
 			return NewLogLine()
 		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
+		func(i int, obj fyne.CanvasObject) {
 			p.mu.RLock()
 			defer p.mu.RUnlock()
-			if id < 0 || id >= len(p.displayed) {
+			if i < 0 || i >= len(p.displayed) {
 				return
 			}
 			line := obj.(*LogLine)
-			continuation := isContinuation(p.displayed, id)
-			line.SetEntry(p.displayed[id], continuation)
+			line.SetEntry(p.displayed[i], isContinuation(p.displayed, i))
 		},
 	)
-	p.list.OnSelected = func(id widget.ListItemID) {
-		// noop
-	}
 
-	// Scrolling up pauses auto-scroll; the "jump to bottom" button
-	// re-enables it. This never fights the user's scrolling.
-	p.scroller = newScrollInterceptor(p.list, func() {
-		p.mu.Lock()
-		was := p.autoScroll
-		p.autoScroll = false
-		p.mu.Unlock()
-		if was {
-			p.bottomBtn.Show()
-		}
-	})
+	p.scroll = container.NewScroll(p.vlist)
+	p.scroll.Direction = container.ScrollBoth
+	// Re-render visible rows on any scroll (virtualization)
+	p.scroll.OnScrolled = func(pos fyne.Position) {
+		p.vlist.OnScrolled(pos)
+		p.checkUserScroll(pos)
+	}
 
 	p.bottomBtn = widget.NewButtonWithIcon("Jump to bottom", theme.MoveDownIcon(), func() {
 		p.mu.Lock()
 		p.autoScroll = true
 		p.mu.Unlock()
 		p.bottomBtn.Hide()
-		p.list.ScrollToBottom()
-		p.scroller.sync()
+		p.scroll.ScrollToBottom()
+		p.syncScroll()
 	})
 	p.bottomBtn.Importance = widget.HighImportance
 	p.bottomBtn.Hide()
 
-	// Horizontal scroll lets long messages be read: the wideList reports
-	// the full content width as its MinSize, so the scroller can scroll.
-	p.wide = newWideList(p.scroller)
-	hScroll := container.NewHScroll(p.wide)
-
-	p.listArea = container.NewStack(hScroll,
+	p.listArea = container.NewStack(p.scroll,
 		container.NewVBox(
 			layout.NewSpacer(),
 			container.NewHBox(layout.NewSpacer(), p.bottomBtn, layout.NewSpacer()),
@@ -247,11 +142,27 @@ func (p *LogcatPanel) SetWindow(w fyne.Window) {
 	p.packageFilter.SetWindow(w)
 }
 
+// checkUserScroll pauses auto-scroll when the user scrolls up.
+func (p *LogcatPanel) checkUserScroll(pos fyne.Position) {
+	if pos.Y < p.lastOffsetY-1 {
+		p.mu.Lock()
+		was := p.autoScroll
+		p.autoScroll = false
+		p.mu.Unlock()
+		if was {
+			p.bottomBtn.Show()
+		}
+	}
+	p.lastOffsetY = pos.Y
+}
+
+// syncScroll records the current offset after a programmatic scroll.
+func (p *LogcatPanel) syncScroll() {
+	p.lastOffsetY = p.scroll.Offset.Y
+}
+
 // RefreshDisplay re-applies filters and updates the list. Call from UI thread.
 func (p *LogcatPanel) RefreshDisplay() {
-	// Always check for user scrolls, even when no new logs arrived.
-	p.scroller.check()
-
 	p.mu.Lock()
 	changed := p.textFilter != p.lastFilter ||
 		p.packageFilterName != p.lastPackage ||
@@ -276,7 +187,7 @@ func (p *LogcatPanel) refreshDisplay() {
 		p.lastPackage = p.packageFilterName
 		p.mu.Unlock()
 
-		p.list.Refresh()
+		p.vlist.RefreshRows()
 		p.statusLabel.SetText("Select a package to view logs")
 		return
 	}
@@ -306,23 +217,27 @@ func (p *LogcatPanel) refreshDisplay() {
 	p.lastCount = total
 	p.lastFilter = p.textFilter
 	p.lastPackage = p.packageFilterName
+	displayed := p.displayed
 	p.mu.Unlock()
 
-	// Compute the full content width for the horizontal scroller:
-	// fixed columns + the longest message rendered in monospace.
-	p.wide.setMinWidth(FixedColumnsWidth + p.maxMessageWidth(p.displayed))
+	// Full content width = fixed columns + longest message (monospace).
+	fullW := FixedColumnsWidth + maxMessageWidth(displayed)
+	if fullW != p.lastFullW {
+		fmt.Printf("[logcat] content %.0f vs visible %.0f\n", fullW, p.scroll.Size().Width)
+		p.lastFullW = fullW
+	}
+	p.vlist.setContentWidth(fullW)
 
-	p.list.Refresh()
+	p.vlist.RefreshRows()
 	p.statusLabel.SetText(formatLogCount(count, total))
 	if p.autoScroll && count > 0 {
-		p.list.ScrollToBottom()
-		// Baseline: after our scroll, only the user can decrease the offset.
-		p.scroller.sync()
+		p.scroll.ScrollToBottom()
+		p.syncScroll()
 	}
 }
 
 // maxMessageWidth returns the pixel width of the longest message.
-func (p *LogcatPanel) maxMessageWidth(entries []logcat.Entry) float32 {
+func maxMessageWidth(entries []logcat.Entry) float32 {
 	maxChars := 0
 	for _, e := range entries {
 		n := len(e.Message)
@@ -336,7 +251,6 @@ func (p *LogcatPanel) maxMessageWidth(entries []logcat.Entry) float32 {
 	if maxChars == 0 {
 		return 0
 	}
-	// Measure a run of M's: monospace, so it's exact per-char.
 	m := strings.Repeat("M", maxChars)
 	return fyne.MeasureText(m, theme.TextSize(), fyne.TextStyle{Monospace: true}).Width
 }
@@ -359,7 +273,7 @@ func (p *LogcatPanel) Clear() {
 	p.mu.Lock()
 	p.displayed = nil
 	p.mu.Unlock()
-	p.list.Refresh()
+	p.vlist.RefreshRows()
 	p.statusLabel.SetText("Select a package to view logs")
 }
 
