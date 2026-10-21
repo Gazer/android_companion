@@ -85,6 +85,19 @@ func (w *EmulatorWidget) SetFrame(f emulator.Frame) {
 	w.img.Refresh()
 }
 
+// Clear drops the last frame, so a new session doesn't show the previous
+// emulator's screen.
+func (w *EmulatorWidget) Clear() {
+	w.mu.Lock()
+	w.frame = nil
+	w.hasFrame = false
+	w.frameW, w.frameH = 0, 0
+	w.img.Image = image.NewRGBA(image.Rect(0, 0, 1, 1))
+	w.mu.Unlock()
+	w.framesReceived.Store(0)
+	w.img.Refresh()
+}
+
 // MinSize returns a reasonable default size.
 func (w *EmulatorWidget) MinSize() fyne.Size {
 	return fyne.NewSize(360, 640)

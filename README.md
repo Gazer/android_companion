@@ -1,6 +1,6 @@
 # Android Companion
 
-A desktop app that launches an Android emulator **embedded inside the window** with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
+A desktop app that launches an Android emulator **embedded inside the window**, or connects to a **physical device over USB or Wi-Fi**, with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
 
 Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator).
 
@@ -8,12 +8,19 @@ Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism 
 
 ## Features
 
+### Devices
+
+- Picker with the connected devices (USB, Wi-Fi, running emulators) and the AVDs to launch; it refreshes as devices come and go
+- Pair a device over Wi-Fi with a pairing code (Android 11+), or `adb connect` to it
+- Physical devices get logs and plugins; screen mirroring is only available for emulators
+- If the device disconnects, the app goes back to the picker and keeps its logs
+- Pass `-avd <name>` or `-serial <serial>` to skip the picker
+
 ### Emulator
 
-- AVD picker on launch (or pass `-avd <name>` to skip it)
 - Click, tap and drag directly on the emulator screen
 - On-screen back / home / recents buttons
-- Closing the window kills the emulator
+- Stop button, back to the picker; closing the window also kills the emulator
 
 ### Logcat
 
@@ -53,7 +60,8 @@ label:   Buffering $0%     -> badge shows "Buffering 42%"
 ## Requirements
 
 - Go 1.22+
-- Android SDK with `emulator` and `adb` (`ANDROID_HOME` respected)
+- `adb`, from the Android SDK platform-tools (`ANDROID_HOME` respected) or in `PATH`
+- To launch emulators: the Android Emulator SDK package and at least one AVD
 - **Linux**: `sudo apt install libgl1-mesa-dev xorg-dev`
 - **macOS**: no extra deps
 - For regenerating protobufs: `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`
@@ -62,9 +70,10 @@ label:   Buffering $0%     -> badge shows "Buffering 42%"
 
 ```sh
 make build
-./android-companion                     # in-app AVD picker
-./android-companion -avd Pixel_8        # skip picker
-./android-companion -avd Pixel_8 -wipe  # cold boot with data wipe
+./android-companion                         # in-app picker
+./android-companion -avd Pixel_8            # launch an AVD, skip picker
+./android-companion -avd Pixel_8 -wipe      # cold boot with data wipe
+./android-companion -serial 11041FDD4002MQ  # open a connected device (see `adb devices`)
 ```
 
 Run tests:
@@ -75,6 +84,7 @@ go test ./...
 
 ## Project layout
 
+- `internal/adb` — device list, device info, Wi-Fi pairing
 - `internal/avd` — SDK discovery, AVD list, emulator process
 - `internal/emulator` — gRPC client for the emulator controller
 - `internal/logcat` — `adb logcat` parser and in-memory store

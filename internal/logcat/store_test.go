@@ -210,6 +210,30 @@ func TestSetProcessMapVersion(t *testing.T) {
 	}
 }
 
+func TestParseProcessListToolbox(t *testing.T) {
+	// Android < 8: plain `ps`, PID in the second column.
+	out := "USER     PID   PPID  VSIZE  RSS     WCHAN    PC         NAME\r\n" +
+		"root      1     0     8904   788   ffffffff 00000000 S /init\r\n" +
+		"system    512   300   1702500 90000 ffffffff 00000000 S system_server\r\n" +
+		"u0_a12    1234  300   1500000 60000 ffffffff 00000000 S com.example.app\r\n"
+	apps, seen := parseProcessList(out)
+	if len(seen) != 3 {
+		t.Fatalf("seen = %v, want 3 PIDs", seen)
+	}
+	if apps[1234] != "com.example.app" || len(apps) != 1 {
+		t.Fatalf("apps = %v, want {1234: com.example.app}", apps)
+	}
+}
+
+func TestSetDeviceDropsPreviousMap(t *testing.T) {
+	s := NewStore("", "")
+	s.setProcessMap(parseProcessList("100 com.example.app\n"))
+	s.SetDevice("", "other-serial") // no adb: the refresh is a no-op
+	if pids := s.PIDsForPackage("com.example.app"); len(pids) != 0 {
+		t.Fatalf("PIDs from the previous device survived: %v", pids)
+	}
+}
+
 func TestIsInterestingProcess(t *testing.T) {
 	tests := []struct {
 		name string

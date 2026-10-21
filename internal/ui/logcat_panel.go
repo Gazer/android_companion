@@ -427,6 +427,19 @@ func (p *LogcatPanel) Clear() {
 	p.updateStatus()
 }
 
+// ResetDevice reloads the panel after the store switched to another device
+// (and was cleared). The package filter is kept, but the PIDs collected
+// for it belonged to the previous device.
+func (p *LogcatPanel) ResetDevice() {
+	p.pkgPIDs = nil
+	if p.pkg != "" {
+		p.pkgPIDs = p.store.PIDsForPackage(p.pkg)
+	}
+	p.mapVersion = p.store.MapVersion()
+	p.refreshPackages()
+	p.rebuild()
+}
+
 // CreateRenderer is required by fyne.Widget.
 func (p *LogcatPanel) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(p.Content())

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
@@ -10,7 +12,7 @@ import (
 	"github.com/rmarkiewicz/android-companion/internal/plugin"
 )
 
-// MainWindow holds the top-level UI: emulator | logcat | plugins.
+// MainWindow holds the top-level UI: emulator/device | logcat | plugins.
 type MainWindow struct {
 	window fyne.Window
 
@@ -26,6 +28,7 @@ type MainWindow struct {
 	leftContent    fyne.CanvasObject
 	rightSplit     *container.Split
 	rightContent   fyne.CanvasObject
+	onDisconnect   func()
 }
 
 // NewMainWindow builds the window content and returns the controller.
@@ -101,11 +104,52 @@ func (mw *MainWindow) togglePlugins() {
 // Logcat returns the logcat panel.
 func (mw *MainWindow) Logcat() *LogcatPanel { return mw.logcat }
 
-// ShowEmulator switches the left panel from picker to the emulator view,
-// with the navigation bar (back/home/recents) below the screen.
-func (mw *MainWindow) ShowEmulator() {
-	mw.split.Leading = container.NewBorder(nil, mw.navbar.Content(), nil, nil, mw.emulator)
+// ShowEmulator switches the left panel from the picker to the emulator
+// view: a bar with the AVD name and a Stop button, the screen, and the
+// navigation bar (back/home/recents) below it.
+func (mw *MainWindow) ShowEmulator(title string) {
+	bar := mw.sessionBar(title, "Stop", theme.MediaStopIcon())
+	mw.split.Leading = container.NewBorder(bar, mw.navbar.Content(), nil, nil, mw.emulator)
 	mw.split.Refresh()
+}
+
+// ShowDevice switches the left panel from the picker to a connected
+// device's summary. There's no screen mirroring for devices (yet): logs
+// and plugins work as with an emulator.
+func (mw *MainWindow) ShowDevice(title string, details []string) {
+	bar := mw.sessionBar(title, "Disconnect", theme.LogoutIcon())
+
+	name := widget.NewLabel(title)
+	name.TextStyle = fyne.TextStyle{Bold: true}
+	name.Alignment = fyne.TextAlignCenter
+	info := widget.NewLabel(strings.Join(details, "\n"))
+	info.Alignment = fyne.TextAlignCenter
+	note := widget.NewLabel("Screen mirroring is only available for emulators.\nLogs and plugins work as usual.")
+	note.Alignment = fyne.TextAlignCenter
+	note.SizeName = theme.SizeNameCaptionText
+
+	body := container.NewCenter(container.NewVBox(name, info, widget.NewSeparator(), note))
+	mw.split.Leading = container.NewBorder(bar, nil, nil, nil, body)
+	mw.split.Refresh()
+}
+
+// sessionBar is the top bar of the emulator/device views.
+func (mw *MainWindow) sessionBar(title, action string, icon fyne.Resource) fyne.CanvasObject {
+	label := widget.NewLabel(title)
+	label.TextStyle = fyne.TextStyle{Bold: true}
+	label.Truncation = fyne.TextTruncateEllipsis
+	btn := widget.NewButtonWithIcon(action, icon, func() {
+		if mw.onDisconnect != nil {
+			mw.onDisconnect()
+		}
+	})
+	return container.NewBorder(nil, nil, nil, btn, label)
+}
+
+// SetOnDisconnect sets the action of the Stop (emulator) and Disconnect
+// (device) buttons.
+func (mw *MainWindow) SetOnDisconnect(f func()) {
+	mw.onDisconnect = f
 }
 
 // ShowPicker switches the left panel back to the picker.

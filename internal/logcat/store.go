@@ -66,11 +66,16 @@ func NewStore(adbPath, serial string) *Store {
 }
 
 // SetDevice updates the adb path and serial, then refreshes the process map.
+// Switching to another device drops the previous device's PID map.
 func (s *Store) SetDevice(adbPath, serial string) {
 	s.mu.Lock()
+	changed := s.serial != serial
 	s.adbPath = adbPath
 	s.serial = serial
 	s.mu.Unlock()
+	if changed {
+		s.setProcessMap(map[int32]string{}, map[int32]struct{}{})
+	}
 	s.RefreshProcessMap()
 }
 
@@ -172,28 +177,47 @@ func (s *Store) RefreshProcessMap() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// `ps -A -o PID,NAME` works on Android 8+.
-	cmd := exec.CommandContext(ctx, adbPath, "-s", serial, "shell", "ps", "-A", "-o", "PID,NAME")
-	out, err := cmd.Output()
-	if err != nil {
+	ps := func(args ...string) (map[int32]string, map[int32]struct{}) {
+		args = append([]string{"-s", serial, "shell", "ps"}, args...)
+		out, err := exec.CommandContext(ctx, adbPath, args...).Output()
+		if err != nil {
+			return nil, nil
+		}
+		return parseProcessList(string(out))
+	}
+	// `ps -A -o PID,NAME` works on Android 8+. Older versions (toolbox ps)
+	// list every process with plain `ps`.
+	apps, seen := ps("-A", "-o", "PID,NAME")
+	if len(seen) == 0 {
+		apps, seen = ps()
+	}
+	if len(seen) == 0 {
 		return
 	}
-
-	s.setProcessMap(parseProcessList(string(out)))
+	s.setProcessMap(apps, seen)
 }
 
-// parseProcessList parses `ps -o PID,NAME` output. It returns the PIDs of
-// interesting (app) processes mapped to their names, and the set of all
-// PIDs listed.
+// parseProcessList parses `ps` output. It returns the PIDs of interesting
+// (app) processes mapped to their names, and the set of all PIDs listed.
+// The PID column is taken from the header (first column if there's none);
+// the name is the last column.
 func parseProcessList(out string) (map[int32]string, map[int32]struct{}) {
 	apps := make(map[int32]string)
 	seen := make(map[int32]struct{})
+	pidCol := 0
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
-		pid, err := strconv.ParseInt(fields[0], 10, 32)
+		if i := slices.Index(fields, "PID"); i >= 0 {
+			pidCol = i
+			continue
+		}
+		if pidCol >= len(fields)-1 {
+			continue
+		}
+		pid, err := strconv.ParseInt(fields[pidCol], 10, 32)
 		if err != nil {
 			continue
 		}

@@ -53,7 +53,8 @@ func NewStreamer(adbPath, serial string) *Streamer {
 }
 
 // Start begins streaming logcat in the background.
-// Returned channel receives new entries; close ctx to stop.
+// The returned channel receives new entries and is closed when adb logcat
+// exits: the device was disconnected, or ctx was cancelled / Stop called.
 func (s *Streamer) Start(ctx context.Context) (<-chan Entry, error) {
 	// threadtime format. -T 0 means "only logs from now", not the whole
 	// boot backlog. This avoids flooding the UI with thousands of old lines.
@@ -76,6 +77,7 @@ func (s *Streamer) Start(ctx context.Context) (<-chan Entry, error) {
 	s.addSub(out)
 
 	go func() {
+		defer s.closeSubs()
 		defer s.cmd.Wait()
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -150,4 +152,13 @@ func (s *Streamer) broadcast(e Entry) {
 		default: // drop if consumer is slow
 		}
 	}
+}
+
+func (s *Streamer) closeSubs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ch := range s.subs {
+		close(ch)
+	}
+	s.subs = nil
 }

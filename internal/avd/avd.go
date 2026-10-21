@@ -5,60 +5,91 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rmarkiewicz/android-companion/internal/adb"
 )
 
-// Manager handles emulator lifecycle.
+// Emulator console ports: the emulator accepts even ports in this range,
+// and its adb serial is "emulator-<port>".
+const (
+	firstConsolePort = 5554
+	lastConsolePort  = 5682
+)
+
+// Manager locates the SDK tools and handles the emulator lifecycle.
 type Manager struct {
-	SdkRoot      string
-	EmulatorBin  string
-	AdbBin       string
+	SdkRoot string
+	// EmulatorBin is empty when the Android Emulator isn't installed: only
+	// devices connected to adb can be used then.
+	EmulatorBin string
+	AdbBin      string
 }
 
-// NewManager discovers the Android SDK location.
+// NewManager discovers the Android SDK tools. Only adb is required: it's
+// taken from the SDK's platform-tools, or from PATH.
 func NewManager() (*Manager, error) {
-	sdk := os.Getenv("ANDROID_HOME")
-	if sdk == "" {
-		sdk = os.Getenv("ANDROID_SDK_ROOT")
-	}
-	if sdk == "" {
-		home, _ := os.UserHomeDir()
-		candidates := []string{
-			filepath.Join(home, "Library", "Android", "sdk"), // macOS
-			filepath.Join(home, "Android", "Sdk"),            // Linux
+	m := &Manager{SdkRoot: findSDK()}
+	if m.SdkRoot != "" {
+		if p := filepath.Join(m.SdkRoot, "platform-tools", "adb"); isFile(p) {
+			m.AdbBin = p
 		}
-		for _, c := range candidates {
-			if st, err := os.Stat(c); err == nil && st.IsDir() {
-				sdk = c
-				break
-			}
+		if p := filepath.Join(m.SdkRoot, "emulator", "emulator"); isFile(p) {
+			m.EmulatorBin = p
 		}
 	}
-	if sdk == "" {
-		return nil, fmt.Errorf("Android SDK not found (set ANDROID_HOME)")
+	if m.AdbBin == "" {
+		if p, err := exec.LookPath("adb"); err == nil {
+			m.AdbBin = p
+		}
 	}
-
-	m := &Manager{
-		SdkRoot:     sdk,
-		EmulatorBin: filepath.Join(sdk, "emulator", "emulator"),
-		AdbBin:      filepath.Join(sdk, "platform-tools", "adb"),
-	}
-	if _, err := os.Stat(m.EmulatorBin); err != nil {
-		return nil, fmt.Errorf("emulator binary not found at %s", m.EmulatorBin)
-	}
-	if _, err := os.Stat(m.AdbBin); err != nil {
-		return nil, fmt.Errorf("adb binary not found at %s", m.AdbBin)
+	if m.AdbBin == "" {
+		return nil, errors.New("adb not found: install the Android SDK platform-tools (set ANDROID_HOME) or add adb to PATH")
 	}
 	return m, nil
 }
 
-// ListAVDs returns the names of all configured AVDs.
+func findSDK() string {
+	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
+		if sdk := os.Getenv(env); sdk != "" {
+			return sdk
+		}
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, "Library", "Android", "sdk"), // macOS
+		filepath.Join(home, "Android", "Sdk"),            // Linux
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+func isFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// HasEmulator reports whether AVDs can be listed and launched.
+func (m *Manager) HasEmulator() bool { return m.EmulatorBin != "" }
+
+// ListAVDs returns the names of all configured AVDs (none if the emulator
+// isn't installed).
 func (m *Manager) ListAVDs(ctx context.Context) ([]string, error) {
+	if !m.HasEmulator() {
+		return nil, nil
+	}
 	cmd := exec.CommandContext(ctx, m.EmulatorBin, "-list-avds")
 	out, err := cmd.Output()
 	if err != nil {
@@ -77,21 +108,33 @@ func (m *Manager) ListAVDs(ctx context.Context) ([]string, error) {
 
 // Instance represents a running emulator process.
 type Instance struct {
-	Name    string
+	Name     string
 	GRPCPort int
-	cmd     *exec.Cmd
-	mgr     *Manager
+	// Serial is the emulator's adb serial ("emulator-<console port>").
+	Serial string
+	cmd    *exec.Cmd
+	mgr    *Manager
 }
 
 // Launch starts an emulator headless with the gRPC bridge enabled.
 // It waits until the device is fully booted.
 func (m *Manager) Launch(ctx context.Context, avdName string, grpcPort int, wipeData bool) (*Instance, error) {
+	if !m.HasEmulator() {
+		return nil, errors.New("the Android Emulator is not installed")
+	}
+	// An explicit console port makes the adb serial known in advance, so
+	// other running emulators can't be mistaken for this one.
+	port, err := m.freeConsolePort(ctx)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"-avd", avdName,
+		"-port", strconv.Itoa(port),
 		"-no-window",
 		"-no-audio",
 		"-gpu", "swiftshader_indirect", // safe headless GPU
-		"-grpc", fmt.Sprintf("%d", grpcPort),
+		"-grpc", strconv.Itoa(grpcPort),
 	}
 	if wipeData {
 		args = append(args, "-wipe-data")
@@ -108,7 +151,13 @@ func (m *Manager) Launch(ctx context.Context, avdName string, grpcPort int, wipe
 		return nil, fmt.Errorf("start emulator: %w", err)
 	}
 
-	inst := &Instance{Name: avdName, GRPCPort: grpcPort, cmd: cmd, mgr: m}
+	inst := &Instance{
+		Name:     avdName,
+		GRPCPort: grpcPort,
+		Serial:   "emulator-" + strconv.Itoa(port),
+		cmd:      cmd,
+		mgr:      m,
+	}
 
 	if err := inst.waitBoot(ctx); err != nil {
 		_ = inst.Kill()
@@ -117,20 +166,46 @@ func (m *Manager) Launch(ctx context.Context, avdName string, grpcPort int, wipe
 	return inst, nil
 }
 
+// freeConsolePort returns the first emulator console port not used by a
+// running emulator nor by another process.
+func (m *Manager) freeConsolePort(ctx context.Context) (int, error) {
+	used := make(map[string]bool)
+	if devs, err := adb.ListDevices(ctx, m.AdbBin); err == nil {
+		for _, d := range devs {
+			used[d.Serial] = true
+		}
+	}
+	for port := firstConsolePort; port <= lastConsolePort; port += 2 {
+		if used["emulator-"+strconv.Itoa(port)] {
+			continue
+		}
+		// The emulator also uses port+1 for adb.
+		if portFree(port) && portFree(port+1) {
+			return port, nil
+		}
+	}
+	return 0, errors.New("no free emulator console port")
+}
+
+func portFree(port int) bool {
+	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
 // waitBoot polls adb until sys.boot_completed=1.
 func (i *Instance) waitBoot(ctx context.Context) error {
 	deadline := time.Now().Add(3 * time.Minute)
-	serial, err := i.findSerial(ctx)
-	if err != nil {
-		return err
-	}
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		cmd := exec.CommandContext(ctx, i.mgr.AdbBin, "-s", serial, "shell", "getprop", "sys.boot_completed")
+		cmd := exec.CommandContext(ctx, i.mgr.AdbBin, "-s", i.Serial, "shell", "getprop", "sys.boot_completed")
 		out, err := cmd.Output()
 		if err == nil && strings.TrimSpace(string(out)) == "1" {
 			return nil
@@ -140,38 +215,11 @@ func (i *Instance) waitBoot(ctx context.Context) error {
 	return fmt.Errorf("emulator boot timeout")
 }
 
-// findSerial locates the adb serial for the emulator we just launched.
-// With -no-window the console port is still allocated; we can match by AVD name.
-func (i *Instance) findSerial(ctx context.Context) (string, error) {
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		cmd := exec.CommandContext(ctx, i.mgr.AdbBin, "devices")
-		out, err := cmd.Output()
-		if err == nil {
-			sc := bufio.NewScanner(bytes.NewReader(out))
-			for sc.Scan() {
-				line := strings.TrimSpace(sc.Text())
-				if strings.HasPrefix(line, "emulator-") && strings.Contains(line, "device") {
-					return strings.Fields(line)[0], nil
-				}
-			}
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return "", fmt.Errorf("emulator not found in adb devices")
-}
-
-// Serial returns the adb serial of this instance (e.g. emulator-5554).
-func (i *Instance) Serial(ctx context.Context) (string, error) {
-	return i.findSerial(ctx)
-}
-
 // Kill terminates the emulator process.
 func (i *Instance) Kill() error {
 	if i.cmd.Process == nil {
 		return nil
 	}
-	// Try graceful kill via adb first (saves state)
 	_ = i.cmd.Process.Kill()
 	_ = i.cmd.Wait()
 	return nil
