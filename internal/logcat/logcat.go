@@ -31,15 +31,20 @@ var (
 	reLoose = regexp.MustCompile(`^(\S+\s+\S+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.*)$`)
 )
 
-// Streamer tails logcat and delivers parsed entries.
+// PIDNum returns the PID as a number, or -1 if it doesn't parse.
+func (e *Entry) PIDNum() int32 {
+	return parsePID(e.PID)
+}
+
+// Streamer tails logcat and delivers parsed entries. It keeps no history:
+// the Store is the single source of truth for past entries.
 type Streamer struct {
 	AdbPath string
 	Serial  string
 
-	mu      sync.RWMutex
-	entries []Entry
-	subs    []chan Entry
-	cmd     *exec.Cmd
+	mu   sync.RWMutex
+	subs []chan Entry
+	cmd  *exec.Cmd
 }
 
 // NewStreamer creates a streamer for the given adb serial.
@@ -76,9 +81,7 @@ func (s *Streamer) Start(ctx context.Context) (<-chan Entry, error) {
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
 			line := sc.Text()
-			e := ParseLine(line)
-			s.append(e)
-			s.broadcast(e)
+			s.broadcast(ParseLine(line))
 		}
 	}()
 
@@ -90,15 +93,6 @@ func (s *Streamer) Stop() {
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-}
-
-// Snapshot returns a copy of all entries so far.
-func (s *Streamer) Snapshot() []Entry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	cp := make([]Entry, len(s.entries))
-	copy(cp, s.entries)
-	return cp
 }
 
 // Filter returns entries whose Raw matches the predicate.
@@ -141,12 +135,6 @@ func ParseLine(line string) Entry {
 	return e
 }
 
-func (s *Streamer) append(e Entry) {
-	s.mu.Lock()
-	s.entries = append(s.entries, e)
-	s.mu.Unlock()
-}
-
 func (s *Streamer) addSub(ch chan Entry) {
 	s.mu.Lock()
 	s.subs = append(s.subs, ch)
@@ -159,7 +147,7 @@ func (s *Streamer) broadcast(e Entry) {
 	for _, ch := range s.subs {
 		select {
 		case ch <- e:
-		default: // drop if consumer is slow; snapshot is source of truth
+		default: // drop if consumer is slow
 		}
 	}
 }

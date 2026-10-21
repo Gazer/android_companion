@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"image/color"
 	"hash/fnv"
+	"image/color"
 )
 
 // Color palette inspired by Android Studio logcat.
@@ -60,3 +60,27 @@ func DefaultTextColor() color.RGBA { return defaultTextColor }
 
 // MetaColor returns the color for timestamps, PIDs, package names.
 func MetaColor() color.RGBA { return metaColor }
+
+// Preboxed color.Color values for the log table: assigning a color.RGBA
+// to a color.Color field allocates, and this happens for every cell bind.
+var (
+	defaultTextColorValue color.Color = defaultTextColor
+	metaColorValue        color.Color = metaColor
+	badgeTextColor        color.Color = color.White
+
+	levelColorValues = func() map[string]color.Color {
+		m := make(map[string]color.Color, len(levelColors))
+		for k, v := range levelColors {
+			m[k] = v
+		}
+		return m
+	}()
+)
+
+// levelColor is ColorForLevel as a preboxed color.Color.
+func levelColor(level string) color.Color {
+	if c, ok := levelColorValues[level]; ok {
+		return c
+	}
+	return defaultTextColorValue
+}

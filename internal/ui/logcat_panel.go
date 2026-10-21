@@ -1,10 +1,9 @@
 package ui
 
 import (
-	"fmt"
+	"math"
 	"strconv"
 	"strings"
-	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -16,114 +15,127 @@ import (
 )
 
 const (
-	// maxDisplayedEntries caps how many items the list handles.
-	maxDisplayedEntries = 1000
-	// logRowHeight is the fixed pixel height of one log line.
-	logRowHeight = 20
+	// maxDisplayedRows caps the rows kept in the table while following the
+	// newest logs. Older rows are dropped in chunks of trimChunk.
+	maxDisplayedRows = 20000
+	trimChunk        = maxDisplayedRows / 10
+	// maxDisplayedRowsPaused is the cap while the user reads older logs.
+	// Dropping rows shifts the view (compensated by scrolling), so it's
+	// deferred until this limit and then done in chunks of trimChunk.
+	maxDisplayedRowsPaused = 2 * maxDisplayedRows
+	// msgColumnStep rounds up the message column width, so it doesn't
+	// change (and refresh the whole table) for every slightly longer line.
+	msgColumnStep = 64
 )
 
 // LogcatPanel is the right-side panel with package filter, text filter,
-// and a scrollable (both axes) virtualized log list.
+// and a log table that scrolls on both axes.
+//
+// The table (widget.Table) only creates and binds cells for visible rows
+// and columns, and its single scroller handles both axes, so trackpad
+// gestures work anywhere on it.
+//
+// New logs are read incrementally from the store on each RefreshDisplay.
+// The whole store is only re-filtered when a filter changes or the
+// selected package gets a new PID.
+//
+// All fields are owned by the Fyne UI goroutine.
 type LogcatPanel struct {
 	widget.BaseWidget
 
 	store *logcat.Store
 
-	mu                sync.RWMutex
-	displayed         []logcat.Entry
-	packageFilterName string
-	textFilter        string
+	// Filters. pkgPIDs accumulates every PID seen for pkg, so logs from
+	// previous runs of the app stay visible after it restarts.
+	pkg        string
+	pkgPIDs    map[int32]struct{}
+	filter     string // lower case
+	mapVersion uint64
+
+	// nextSeq is the store sequence number of the next entry to read.
+	nextSeq uint64
+	rows    []logRow
+	builder *rowBuilder
+	metrics *logMetrics
+	msgColW float32
+
+	// following is true while the view sticks to the newest log.
+	following bool
+	vis       visibleRows
 
 	// UI widgets
 	packageFilter *PackageFilter
 	filterEntry   *widget.Entry
-	vlist         *vList
-	scroll        *container.Scroll
+	table         *widget.Table
 	bottomBtn     *widget.Button
 	listArea      *fyne.Container
 	statusLabel   *widget.Label
+}
 
-	autoScroll bool
-	// lastOffsetY tracks the scroll offset to detect user scrolls
-	lastOffsetY float32
-
-	// Track last state to avoid unnecessary rebuilds
-	lastCount   int
-	lastFilter  string
-	lastPackage string
-	lastFullW   float32
+// visibleRows tracks which rows the table shows. widget.Table doesn't
+// expose its scroll offset, but it calls UpdateCell for every visible cell
+// on a full refresh, and for the cells that come into view on scroll.
+type visibleRows struct {
+	// measuring is set during a full refresh triggered by measureVisible.
+	measuring bool
+	// min and max are the first and last visible rows (-1 if unknown).
+	min, max int
 }
 
 // NewLogcatPanel creates the panel.
 func NewLogcatPanel(store *logcat.Store) *LogcatPanel {
-	p := &LogcatPanel{store: store, autoScroll: true}
+	p := &LogcatPanel{
+		store:     store,
+		following: true,
+		vis:       visibleRows{min: -1, max: -1},
+	}
+
+	base := fyne.CurrentApp().Settings().Theme()
+	p.metrics = newLogMetrics(base.Size(theme.SizeNameText))
+	p.builder = newRowBuilder(p.metrics)
 
 	p.packageFilter = NewPackageFilter(func(pkg string) {
-		p.mu.Lock()
-		p.packageFilterName = pkg
-		p.mu.Unlock()
-		p.refreshDisplay()
+		p.pkg = pkg
+		p.pkgPIDs = nil
+		if pkg != "" {
+			p.pkgPIDs = store.PIDsForPackage(pkg)
+		}
+		p.rebuild()
 	})
 
 	p.filterEntry = widget.NewEntry()
 	p.filterEntry.SetPlaceHolder("Filter text...")
 	p.filterEntry.OnChanged = func(s string) {
-		p.mu.Lock()
-		p.textFilter = s
-		p.mu.Unlock()
-		p.refreshDisplay()
+		p.filter = strings.ToLower(s)
+		p.rebuild()
 	}
 
-	p.statusLabel = widget.NewLabel("Select a package to view logs")
+	p.statusLabel = widget.NewLabel("")
 
-	// Virtualized list inside a bidirectional Scroll: one scroller handles
-	// both axes, so trackpad horizontal gestures work everywhere.
-	p.vlist = newVList(logRowHeight,
-		func() int {
-			p.mu.RLock()
-			defer p.mu.RUnlock()
-			return len(p.displayed)
-		},
-		func() fyne.CanvasObject {
-			return NewLogLine()
-		},
-		func(i int, obj fyne.CanvasObject) {
-			p.mu.RLock()
-			defer p.mu.RUnlock()
-			if i < 0 || i >= len(p.displayed) {
-				return
-			}
-			line := obj.(*LogLine)
-			line.SetEntry(p.displayed[i], isContinuation(p.displayed, i))
-		},
+	p.table = widget.NewTable(
+		func() (int, int) { return len(p.rows), numLogColumns },
+		func() fyne.CanvasObject { return newLogCell(p.metrics) },
+		p.updateCell,
 	)
-
-	p.scroll = container.NewScroll(p.vlist)
-	p.scroll.Direction = container.ScrollBoth
-	// Re-render visible rows on any scroll (virtualization)
-	p.scroll.OnScrolled = func(pos fyne.Position) {
-		p.vlist.OnScrolled(pos)
-		p.checkUserScroll(pos)
+	p.table.HideSeparators = true
+	tableArea := container.NewThemeOverride(p.table, logTableTheme{base})
+	for col, w := range p.metrics.colW {
+		p.table.SetColumnWidth(col, w)
 	}
+	p.setMessageColumnWidth(0)
 
-	p.bottomBtn = widget.NewButtonWithIcon("Jump to bottom", theme.MoveDownIcon(), func() {
-		p.mu.Lock()
-		p.autoScroll = true
-		p.mu.Unlock()
-		p.bottomBtn.Hide()
-		p.scroll.ScrollToBottom()
-		p.syncScroll()
-	})
+	p.bottomBtn = widget.NewButtonWithIcon("Jump to bottom", theme.MoveDownIcon(), p.scrollToEnd)
 	p.bottomBtn.Importance = widget.HighImportance
 	p.bottomBtn.Hide()
 
-	p.listArea = container.NewStack(p.scroll,
+	p.listArea = container.NewStack(tableArea,
 		container.NewVBox(
 			layout.NewSpacer(),
 			container.NewHBox(layout.NewSpacer(), p.bottomBtn, layout.NewSpacer()),
 		),
 	)
 
+	p.updateStatus()
 	p.ExtendBaseWidget(p)
 	return p
 }
@@ -142,162 +154,282 @@ func (p *LogcatPanel) SetWindow(w fyne.Window) {
 	p.packageFilter.SetWindow(w)
 }
 
-// checkUserScroll pauses auto-scroll when the user scrolls up.
-func (p *LogcatPanel) checkUserScroll(pos fyne.Position) {
-	if pos.Y < p.lastOffsetY-1 {
-		p.mu.Lock()
-		was := p.autoScroll
-		p.autoScroll = false
-		p.mu.Unlock()
-		if was {
-			p.bottomBtn.Show()
+// RefreshDisplay adds the logs that arrived since the last call. Call it
+// periodically from the UI goroutine.
+func (p *LogcatPanel) RefreshDisplay() {
+	if v := p.store.MapVersion(); v != p.mapVersion {
+		p.mapVersion = v
+		p.refreshPackages()
+		// Logs from PIDs that weren't mapped yet (e.g. the app just
+		// started) were skipped: re-filter if the package got new PIDs.
+		if p.pkg != "" && p.addPackagePIDs(p.store.PIDsForPackage(p.pkg)) {
+			p.rebuild()
+			return
 		}
 	}
-	p.lastOffsetY = pos.Y
-}
 
-// syncScroll records the current offset after a programmatic scroll.
-func (p *LogcatPanel) syncScroll() {
-	p.lastOffsetY = p.scroll.Offset.Y
-}
-
-// RefreshDisplay re-applies filters and updates the list. Call from UI thread.
-func (p *LogcatPanel) RefreshDisplay() {
-	p.mu.Lock()
-	changed := p.textFilter != p.lastFilter ||
-		p.packageFilterName != p.lastPackage ||
-		p.store.Len() != p.lastCount
-	p.mu.Unlock()
-
-	if changed {
-		p.refreshDisplay()
-		p.refreshPackages()
+	entries, next := p.store.Collect(p.nextSeq, p.matches)
+	p.nextSeq = next
+	if len(entries) > 0 {
+		p.appendEntries(entries)
 	}
+	p.updateStatus()
 }
 
-// refreshDisplay recomputes the displayed entries and refreshes the list.
-// If no package is selected, nothing is displayed (performance guard).
-func (p *LogcatPanel) refreshDisplay() {
-	p.mu.Lock()
-	if p.packageFilterName == "" {
-		p.displayed = nil
-		total := p.store.Len()
-		p.lastCount = total
-		p.lastFilter = p.textFilter
-		p.lastPackage = p.packageFilterName
-		p.mu.Unlock()
+// addPackagePIDs merges pids into pkgPIDs and reports whether any was new.
+func (p *LogcatPanel) addPackagePIDs(pids map[int32]struct{}) bool {
+	added := false
+	for pid := range pids {
+		if _, ok := p.pkgPIDs[pid]; !ok {
+			p.pkgPIDs[pid] = struct{}{}
+			added = true
+		}
+	}
+	return added
+}
 
-		p.vlist.RefreshRows()
-		p.statusLabel.SetText("Select a package to view logs")
+// matches applies the package and text filters. It runs under the store
+// lock (see Store.Collect).
+func (p *LogcatPanel) matches(e *logcat.Entry) bool {
+	if p.pkg != "" {
+		if _, ok := p.pkgPIDs[e.PIDNum()]; !ok {
+			return false
+		}
+	}
+	return containsFold(e.Raw, p.filter)
+}
+
+// rebuild re-filters the whole store and jumps to the newest log.
+func (p *LogcatPanel) rebuild() {
+	entries, next := p.store.CollectLast(maxDisplayedRows, p.matches)
+	p.nextSeq = next
+
+	clear(p.rows)
+	p.rows = p.rows[:0]
+	p.builder.reset()
+	for i := range entries {
+		p.rows = append(p.rows, p.builder.build(&entries[i]))
+	}
+	p.msgColW = 0
+	p.setMessageColumnWidth(p.builder.maxMsgW)
+
+	p.table.Refresh()
+	p.scrollToEnd()
+	p.updateStatus()
+}
+
+// appendEntries adds new rows. If the user was looking at the newest log
+// the view follows; otherwise it stays where it is.
+func (p *LogcatPanel) appendEntries(entries []logcat.Entry) {
+	before := len(p.rows)
+	for i := range entries {
+		p.rows = append(p.rows, p.builder.build(&entries[i]))
+	}
+	p.setMessageColumnWidth(p.builder.maxMsgW)
+
+	// Rows were only appended, so the table still shows the same row
+	// indices: if the last one was among them, the user is at the bottom.
+	p.measureVisible()
+	atBottom := p.vis.max < 0 || p.vis.max >= before-1
+
+	if atBottom {
+		if len(p.rows) > maxDisplayedRows {
+			p.trimFront(len(p.rows) - maxDisplayedRows + trimChunk)
+		}
+		p.scrollToEnd()
 		return
 	}
 
-	packageFiltered := p.store.FilterByPackage(p.packageFilterName)
-	if p.textFilter == "" {
-		p.displayed = packageFiltered
-	} else {
-		tf := strings.ToLower(p.textFilter)
-		out := packageFiltered[:0]
-		for _, e := range packageFiltered {
-			if strings.Contains(strings.ToLower(e.Raw), tf) ||
-				strings.Contains(strings.ToLower(e.Tag), tf) ||
-				strings.Contains(strings.ToLower(e.Message), tf) {
-				out = append(out, e)
-			}
+	p.setFollowing(false)
+	if len(p.rows) > maxDisplayedRowsPaused {
+		dropped := p.trimFront(len(p.rows) - maxDisplayedRowsPaused + trimChunk)
+		// Keep the same logs on screen.
+		if off, ok := tableOffset(p.table); ok {
+			y := max(off.Y-float32(dropped)*p.metrics.rowStride(), 0)
+			p.table.ScrollToOffset(fyne.NewPos(off.X, y))
+		} else {
+			p.table.Refresh()
 		}
-		p.displayed = out
-	}
-
-	if len(p.displayed) > maxDisplayedEntries {
-		p.displayed = p.displayed[len(p.displayed)-maxDisplayedEntries:]
-	}
-
-	count := len(p.displayed)
-	total := p.store.Len()
-	p.lastCount = total
-	p.lastFilter = p.textFilter
-	p.lastPackage = p.packageFilterName
-	displayed := p.displayed
-	p.mu.Unlock()
-
-	// Full content width = fixed columns + longest message (monospace).
-	fullW := FixedColumnsWidth + maxMessageWidth(displayed)
-	if fullW != p.lastFullW {
-		fmt.Printf("[logcat] content %.0f vs visible %.0f\n", fullW, p.scroll.Size().Width)
-		p.lastFullW = fullW
-	}
-	p.vlist.setContentWidth(fullW)
-
-	p.vlist.RefreshRows()
-	p.statusLabel.SetText(formatLogCount(count, total))
-	if p.autoScroll && count > 0 {
-		p.scroll.ScrollToBottom()
-		p.syncScroll()
 	}
 }
 
-// maxMessageWidth returns the pixel width of the longest message.
-func maxMessageWidth(entries []logcat.Entry) float32 {
-	maxChars := 0
-	for _, e := range entries {
-		n := len(e.Message)
-		if e.Time == "" && len(e.Raw) > n {
-			n = len(e.Raw)
-		}
-		if n > maxChars {
-			maxChars = n
-		}
-	}
-	if maxChars == 0 {
+// trimFront drops the oldest n rows and returns how many were dropped.
+func (p *LogcatPanel) trimFront(n int) int {
+	n = min(n, len(p.rows))
+	if n <= 0 {
 		return 0
 	}
-	m := strings.Repeat("M", maxChars)
-	return fyne.MeasureText(m, theme.TextSize(), fyne.TextStyle{Monospace: true}).Width
+	kept := copy(p.rows, p.rows[n:])
+	clear(p.rows[kept:]) // release the strings for the GC
+	p.rows = p.rows[:kept]
+	if kept > 0 && p.rows[0].parsed {
+		p.rows[0].showHeader = true // its header row is gone
+	}
+	return n
+}
+
+// scrollToEnd shows the newest row, keeping the horizontal offset, and
+// resumes following.
+func (p *LogcatPanel) scrollToEnd() {
+	n := len(p.rows)
+	if n == 0 {
+		p.table.Refresh()
+		p.setFollowing(true)
+		return
+	}
+	if off, ok := tableOffset(p.table); ok {
+		// The scroller clamps Y to the content height.
+		end := fyne.NewPos(off.X, math.MaxFloat32)
+		p.table.ScrollToOffset(end)
+		// The clamp checks the scroller's previous content size first: if
+		// the rows used to fit in the view it resets the offset to the
+		// top, so repeat once the scroller has picked up the new size.
+		p.table.ScrollToOffset(end)
+	} else {
+		p.table.ScrollToBottom()
+	}
+
+	if p.vis.max >= 0 {
+		span := p.vis.max - p.vis.min
+		p.vis.max = n - 1
+		p.vis.min = max(n-1-span, 0)
+	}
+	p.setFollowing(true)
+}
+
+// measureVisible refreshes the table and records which rows it shows.
+func (p *LogcatPanel) measureVisible() {
+	p.vis = visibleRows{measuring: true, min: -1, max: -1}
+	p.table.Refresh()
+	p.vis.measuring = false
+}
+
+// noteVisibleRow is called for every bound cell. Outside measureVisible
+// it means the row just came into view (scroll or resize).
+func (p *LogcatPanel) noteVisibleRow(row int) {
+	v := &p.vis
+	if v.measuring {
+		if v.min < 0 || row < v.min {
+			v.min = row
+		}
+		if row > v.max {
+			v.max = row
+		}
+		return
+	}
+	if v.max < 0 {
+		return
+	}
+	span := v.max - v.min
+	switch {
+	case row < v.min:
+		v.min, v.max = row, row+span
+	case row > v.max:
+		v.min, v.max = row-span, row
+	default:
+		return
+	}
+	p.setFollowing(v.max >= len(p.rows)-1)
+}
+
+// setFollowing records whether the view follows new logs and shows the
+// "Jump to bottom" button when it doesn't.
+func (p *LogcatPanel) setFollowing(on bool) {
+	p.following = on
+	if on || len(p.rows) == 0 {
+		p.bottomBtn.Hide()
+	} else {
+		p.bottomBtn.Show()
+	}
+}
+
+// updateCell binds a table cell to its row (Table.UpdateCell).
+func (p *LogcatPanel) updateCell(id widget.TableCellID, obj fyne.CanvasObject) {
+	c := obj.(*logCell)
+	if id.Row < 0 || id.Row >= len(p.rows) {
+		if id.Col == colLevel {
+			c.setBadge("", nil)
+		} else {
+			c.setText("", nil)
+		}
+		return
+	}
+	p.noteVisibleRow(id.Row)
+
+	r := &p.rows[id.Row]
+	header := r.parsed && r.showHeader
+	switch id.Col {
+	case colTime:
+		c.setText(textIf(header, r.time), metaColorValue)
+	case colPID:
+		c.setText(textIf(header, r.pidTid), metaColorValue)
+	case colTag:
+		c.setText(textIf(header, r.tag), r.tagColor)
+	case colLevel:
+		if header {
+			c.setBadge(r.level, r.levelColor)
+		} else {
+			c.setBadge("", nil)
+		}
+	default:
+		c.setText(r.msg, r.msgColor)
+	}
+}
+
+func textIf(ok bool, s string) string {
+	if ok {
+		return s
+	}
+	return ""
+}
+
+// setMessageColumnWidth sizes the message column for text of width textW.
+func (p *LogcatPanel) setMessageColumnWidth(textW float32) {
+	w := float32(math.Ceil(float64(textW+p.metrics.charW)/msgColumnStep) * msgColumnStep)
+	if w == p.msgColW {
+		return
+	}
+	p.msgColW = w
+	p.table.SetColumnWidth(colMessage, w)
+}
+
+func (p *LogcatPanel) updateStatus() {
+	text := "Waiting for logs..."
+	if total := p.store.Len(); total > 0 {
+		text = formatLogCount(len(p.rows), total)
+	}
+	if p.statusLabel.Text != text {
+		p.statusLabel.SetText(text)
+	}
 }
 
 // refreshPackages updates the package list from the store's index.
 func (p *LogcatPanel) refreshPackages() {
-	packages := p.store.Packages()
-	p.packageFilter.SetPackages(packages)
+	p.packageFilter.SetPackages(p.store.Packages())
 }
 
-// SetAutoScroll toggles following the tail.
+// SetAutoScroll toggles following the newest logs.
 func (p *LogcatPanel) SetAutoScroll(b bool) {
-	p.mu.Lock()
-	p.autoScroll = b
-	p.mu.Unlock()
+	if b {
+		p.scrollToEnd()
+	} else {
+		p.setFollowing(false)
+	}
 }
 
 // Clear wipes the display (not the store).
 func (p *LogcatPanel) Clear() {
-	p.mu.Lock()
-	p.displayed = nil
-	p.mu.Unlock()
-	p.vlist.RefreshRows()
-	p.statusLabel.SetText("Select a package to view logs")
+	_, p.nextSeq = p.store.Collect(math.MaxUint64, nil)
+	clear(p.rows)
+	p.rows = p.rows[:0]
+	p.builder.reset()
+	p.scrollToEnd()
+	p.updateStatus()
 }
 
 // CreateRenderer is required by fyne.Widget.
 func (p *LogcatPanel) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(p.Content())
-}
-
-// isContinuation reports whether entries[id] is a physical continuation of
-// entries[id-1]: logcat repeats the full header (timestamp, pid, tid, tag)
-// on every physical line of a multi-line message, but Android Studio only
-// draws the header on the first one.
-func isContinuation(entries []logcat.Entry, id int) bool {
-	if id <= 0 || id >= len(entries) {
-		return false
-	}
-	cur, prev := entries[id], entries[id-1]
-	if cur.Time == "" {
-		return true // unparsed line: always a continuation visually
-	}
-	return cur.Time == prev.Time &&
-		cur.PID == prev.PID &&
-		cur.TID == prev.TID &&
-		cur.Tag == prev.Tag
 }
 
 func formatLogCount(displayed, total int) string {

@@ -220,9 +220,10 @@ func (s *session) launchAsync(parent context.Context, name string) {
 			}
 		}()
 
-		// Periodic UI refresh for the logcat panel (2fps is plenty for reading)
+		// Periodic UI refresh for the logcat panel. Each tick only reads the
+		// logs added since the previous one, so it's cheap.
 		go func() {
-			ticker := time.NewTicker(500 * time.Millisecond)
+			ticker := time.NewTicker(250 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
