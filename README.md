@@ -1,60 +1,86 @@
 # Android Companion
 
-A desktop app that launches an Android emulator **embedded inside the window** with a live, scrollable and filterable **logcat** panel on the right.
+A desktop app that launches an Android emulator **embedded inside the window** with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
 
-Built with **Go + Fyne** (native cross-platform UI) and the emulator's **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator).
+Built with **Go + Fyne** and the emulator's **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator).
+
+![screenshot](screenshot.png)
 
 ## Features
 
+### Emulator
+
 - AVD picker on launch (or pass `-avd <name>` to skip it)
-- Resizable split view: emulator on the left, logcat on the right (drag the divider)
-- Emulator runs headless; its screen is streamed via gRPC `streamScreenshot` (RGB888) into a Fyne canvas
-- Click/tap and drag directly on the emulator view (forwarded via gRPC `sendMouse`)
-- Live logcat with:
-  - virtualized list (only renders visible rows)
-  - filter box (matches raw line, tag, or message; case-insensitive)
-  - auto-scroll to bottom
-  - bounded ring buffer (100k entries) to cap memory
+- Click, tap and drag directly on the emulator screen
+- On-screen back / home / recents buttons
 - Closing the window kills the emulator
+
+### Logcat
+
+- Android Studio look: aligned columns, colored tags and severity levels
+- Multi-line messages
+- Package picker plus free-text filter
+- Auto-scroll that stops when you scroll up and resumes with a jump-to-bottom button
+- Horizontal scrolling for long lines
+- The log keeps up even on chatty apps: only visible rows are rendered
+
+### Plugins
+
+Widgets driven by log lines, in a collapsible right column. Add, edit and remove them; configs persist across restarts.
+
+**Line chart** — plot a value extracted from matching lines in real time:
+
+```
+pattern: frame took {%d}ms
+```
+
+`{%d}` captures an integer, `{%f}` a decimal, `{%s}` a word.
+
+**Status badge** — a colored badge that reflects the last matching rule:
+
+```
+rule 1: "player started"  -> Playing (green)
+rule 2: "player paused"   -> Paused  (amber)
+```
+
+Captured values can be shown in the label:
+
+```
+pattern: buffering at {%d}%
+label:   Buffering $0%     -> badge shows "Buffering 42%"
+```
 
 ## Requirements
 
 - Go 1.22+
 - Android SDK with `emulator` and `adb` (`ANDROID_HOME` respected)
 - **Linux**: `sudo apt install libgl1-mesa-dev xorg-dev`
-- **macOS**: no extra deps (Fyne uses system frameworks)
+- **macOS**: no extra deps
 - For regenerating protobufs: `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`
 
 ## Build & Run
 
 ```sh
 make build
-./android-companion              # in-app AVD picker
-./android-companion -avd Pixel_8 # skip picker, launch directly
+./android-companion                     # in-app AVD picker
+./android-companion -avd Pixel_8        # skip picker
 ./android-companion -avd Pixel_8 -wipe  # cold boot with data wipe
 ```
 
-## Architecture
+Run tests:
 
-```
-┌─────────────────────────────┬──────────────────┐
-│                             │  Filter: [____]  │
-│   Emulator screen           ├──────────────────┤
-│   (Fyne canvas.Raster       │  I/ActivityTask..│
-│    from gRPC RGB888 stream) │  W/PackageMana.. │
-│                             │  D/MyApp: hello  │
-│   mouse/drag forwarded      │  ...             │
-│   via gRPC                  │  (virtualized    │
-│                             │   widget.List)   │
-│        ◄── draggable split ──┤                  │
-└─────────────────────────────┴──────────────────┘
+```sh
+go test ./...
 ```
 
-- `internal/avd` — discover SDK, list AVDs, launch/kill emulator
-- `internal/emulator` — gRPC client for `EmulatorController` (generated from `emulator_controller.proto`)
-- `internal/logcat` — `adb logcat` streaming parser
-- `internal/ui` — Fyne widgets: picker, emulator canvas, logcat panel, main window with `HSplit`
-- `internal/app` — lifecycle orchestration, gRPC/logcat goroutines, thread-safe UI updates via `fyne.Do`
+## Project layout
+
+- `internal/avd` — SDK discovery, AVD list, emulator process
+- `internal/emulator` — gRPC client for the emulator controller
+- `internal/logcat` — `adb logcat` parser and in-memory store
+- `internal/plugin` — plugin interface, registry, pattern compiler, persistence (`chart`, `status`)
+- `internal/ui` — the widgets
+- `internal/app` — wiring and lifecycle
 
 ## Regenerating protobuf bindings
 
@@ -66,7 +92,7 @@ The proto file is copied from `$ANDROID_HOME/emulator/lib/emulator_controller.pr
 
 ## Cross-compilation
 
-Fyne uses cgo (OpenGL/system UI), so native builds per OS are simplest:
+Fyne uses cgo, so native builds per OS are simplest:
 
 ```sh
 # On Linux
@@ -75,3 +101,7 @@ GOOS=linux go build -o android-companion-linux .
 # On macOS
 GOOS=darwin go build -o android-companion-darwin .
 ```
+
+---
+
+Made with ❤️ by Ricardo Markiewicz // [@gazeria](https://x.com/gazeria)
