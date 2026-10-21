@@ -45,6 +45,9 @@ func SaveCharts(cfgs []ChartConfig) error {
 	if err != nil {
 		return err
 	}
+	if cfgs == nil {
+		cfgs = []ChartConfig{} // write [] instead of null
+	}
 	data, err := json.MarshalIndent(cfgs, "", "  ")
 	if err != nil {
 		return err
@@ -91,6 +94,9 @@ func SaveStatuses(cfgs []StatusConfig) error {
 	path, err := statusesFile()
 	if err != nil {
 		return err
+	}
+	if cfgs == nil {
+		cfgs = []StatusConfig{} // write [] instead of null
 	}
 	data, err := json.MarshalIndent(cfgs, "", "  ")
 	if err != nil {

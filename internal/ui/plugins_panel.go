@@ -27,6 +27,12 @@ type PluginsPanel struct {
 	scroll  *container.Scroll
 	empty   *widget.Label
 	content *fyne.Container
+
+	// restoring is true while loadSaved runs: Add() fires during restore,
+	// and we must not persist until everything is loaded (otherwise each
+	// restored chart would rewrite statuses.json as empty before the
+	// statuses themselves are loaded).
+	restoring bool
 }
 
 // NewPluginsPanel creates the panel wired to the plugin registry.
@@ -53,16 +59,22 @@ func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 		fyne.Do(func() {
 			p.rebuild()
 		})
-		p.save()
+		if !p.restoring {
+			p.save()
+		}
 	})
 	reg.SetOnRemove(func(pl plugin.Plugin) {
-		p.save()
+		if !p.restoring {
+			p.save()
+		}
 	})
 
 	p.ExtendBaseWidget(p)
 
 	// Restore persisted plugins
+	p.restoring = true
 	p.loadSaved()
+	p.restoring = false
 
 	return p
 }
@@ -93,8 +105,12 @@ func (p *PluginsPanel) save() {
 			})
 		}
 	}
-	_ = plugin.SaveCharts(charts)     // best-effort
-	_ = plugin.SaveStatuses(statuses) // best-effort
+	if err := plugin.SaveCharts(charts); err != nil {
+		fmt.Printf("[plugins] save charts failed: %v\n", err)
+	}
+	if err := plugin.SaveStatuses(statuses); err != nil {
+		fmt.Printf("[plugins] save statuses failed: %v\n", err)
+	}
 }
 
 // loadSaved restores plugins persisted from previous runs.
