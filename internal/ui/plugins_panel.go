@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -9,10 +12,11 @@ import (
 
 	"github.com/rmarkiewicz/android-companion/internal/plugin"
 	"github.com/rmarkiewicz/android-companion/internal/plugin/chart"
+	"github.com/rmarkiewicz/android-companion/internal/plugin/status"
 )
 
 // PluginsPanel is the right-side column holding active plugin widgets,
-// with an "Add chart" button and per-widget close buttons.
+// with "Add chart" / "Add status" buttons and per-widget close buttons.
 type PluginsPanel struct {
 	widget.BaseWidget
 
@@ -29,17 +33,18 @@ type PluginsPanel struct {
 func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 	p := &PluginsPanel{registry: reg}
 
-	p.empty = widget.NewLabel("No widgets yet.\nClick + to add a chart.")
+	p.empty = widget.NewLabel("No widgets yet.\nAdd a chart or a status.")
 	p.empty.Alignment = fyne.TextAlignCenter
 	p.empty.Wrapping = fyne.TextWrapWord
 
 	p.vbox = container.NewVBox(p.empty)
 	p.scroll = container.NewVScroll(p.vbox)
 
-	addBtn := widget.NewButtonWithIcon("Add chart", theme.ContentAddIcon(), p.showAddChartDialog)
+	addChartBtn := widget.NewButtonWithIcon("Add chart", theme.ContentAddIcon(), p.showAddChartDialog)
+	addStatusBtn := widget.NewButtonWithIcon("Add status", theme.ContentAddIcon(), p.showAddStatusDialog)
 
 	p.content = container.NewBorder(
-		container.NewHBox(addBtn),
+		container.NewHBox(addChartBtn, addStatusBtn),
 		nil, nil, nil,
 		p.scroll,
 	)
@@ -56,45 +61,79 @@ func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 
 	p.ExtendBaseWidget(p)
 
-	// Restore persisted charts
+	// Restore persisted plugins
 	p.loadSaved()
 
 	return p
 }
 
-// save persists the current chart configs to disk.
+// save persists all plugin configs to disk.
 func (p *PluginsPanel) save() {
-	var cfgs []plugin.ChartConfig
+	var charts []plugin.ChartConfig
+	var statuses []plugin.StatusConfig
 	for _, pl := range p.registry.Plugins() {
-		if c, ok := pl.(*chart.Plugin); ok {
-			cfgs = append(cfgs, plugin.ChartConfig{
+		switch c := pl.(type) {
+		case *chart.Plugin:
+			charts = append(charts, plugin.ChartConfig{
 				Name:    c.Name(),
 				Pattern: c.Pattern(),
 			})
+		case *status.Plugin:
+			var rules []plugin.StatusRule
+			for _, r := range c.Rules() {
+				rules = append(rules, plugin.StatusRule{
+					Pattern: r.Pattern,
+					Label:   r.Label,
+					Color:   r.Color,
+				})
+			}
+			statuses = append(statuses, plugin.StatusConfig{
+				Name:  c.Name(),
+				Rules: rules,
+			})
 		}
 	}
-	_ = plugin.SaveCharts(cfgs) // best-effort
+	_ = plugin.SaveCharts(charts)     // best-effort
+	_ = plugin.SaveStatuses(statuses) // best-effort
 }
 
-// loadSaved restores charts persisted from previous runs.
+// loadSaved restores plugins persisted from previous runs.
 func (p *PluginsPanel) loadSaved() {
-	cfgs, err := plugin.LoadCharts()
-	if err != nil || len(cfgs) == 0 {
-		return
-	}
-	for _, cfg := range cfgs {
-		cfg := cfg // capture
-		var pl *chart.Plugin
-		pl, err := chart.New(cfg.Name, cfg.Pattern, func() {
-			p.registry.Remove(pl)
-			fyne.Do(func() {
-				p.rebuild()
+	if cfgs, err := plugin.LoadCharts(); err == nil {
+		for _, cfg := range cfgs {
+			cfg := cfg
+			var pl *chart.Plugin
+			pl, err := chart.New(cfg.Name, cfg.Pattern, func() {
+				p.registry.Remove(pl)
+				fyne.Do(func() { p.rebuild() })
 			})
-		})
-		if err != nil {
-			continue // skip broken patterns silently
+			if err != nil {
+				continue
+			}
+			p.registry.Add(pl)
 		}
-		p.registry.Add(pl)
+	}
+	if cfgs, err := plugin.LoadStatuses(); err == nil {
+		for _, cfg := range cfgs {
+			cfg := cfg
+			var rules []status.Rule
+			for _, r := range cfg.Rules {
+				rules = append(rules, status.Rule{
+					Pattern: r.Pattern,
+					Label:   r.Label,
+					Color:   r.Color,
+				})
+			}
+			var pl *status.Plugin
+			pl, err := status.New(cfg.Name, rules, func() {
+				p.registry.Remove(pl)
+				fyne.Do(func() { p.rebuild() })
+			})
+			if err != nil {
+				continue
+			}
+			p.registry.Add(pl)
+		}
 	}
 }
 
@@ -162,11 +201,8 @@ func (p *PluginsPanel) showAddChartDialog() {
 		var pl *chart.Plugin
 		var err error
 		pl, err = chart.New(name, pattern, func() {
-			// onClose: remove from registry and rebuild on UI thread
 			p.registry.Remove(pl)
-			fyne.Do(func() {
-				p.rebuild()
-			})
+			fyne.Do(func() { p.rebuild() })
 		})
 		if err != nil {
 			dialog.ShowError(err, p.window)
@@ -175,6 +211,122 @@ func (p *PluginsPanel) showAddChartDialog() {
 		p.registry.Add(pl)
 	}, p.window)
 	d.Resize(fyne.NewSize(500, 300))
+	d.Show()
+}
+
+// ruleRow is one editable rule in the status dialog.
+type ruleRow struct {
+	pattern *widget.Entry
+	label   *widget.Entry
+	color   *widget.Entry
+	swath   *canvas.Rectangle
+	box     *fyne.Container
+}
+
+func newRuleRow(onChange func()) *ruleRow {
+	r := &ruleRow{}
+	r.pattern = widget.NewEntry()
+	r.pattern.SetPlaceHolder("log substring")
+	r.label = widget.NewEntry()
+	r.label.SetPlaceHolder("label")
+	r.color = widget.NewEntry()
+	r.color.SetPlaceHolder("#4CAF50")
+	r.swath = canvas.NewRectangle(theme.Color(theme.ColorNamePrimary))
+	r.swath.SetMinSize(fyne.NewSize(24, 24))
+	r.swath.CornerRadius = 4
+
+	r.color.OnChanged = func(s string) {
+		if c, err := status.ParseHexColor(s); err == nil {
+			r.swath.FillColor = c
+			r.swath.Refresh()
+		}
+		if onChange != nil {
+			onChange()
+		}
+	}
+
+	r.box = container.NewBorder(nil, nil, nil, container.NewHBox(r.color, r.swath),
+		container.NewGridWithColumns(2, r.pattern, r.label),
+	)
+	return r
+}
+
+func (r *ruleRow) toRule() status.Rule {
+	return status.Rule{
+		Pattern: r.pattern.Text,
+		Label:   r.label.Text,
+		Color:   r.color.Text,
+	}
+}
+
+// showAddStatusDialog opens the dialog to configure a status plugin
+// with N rules (pattern + label + color each).
+func (p *PluginsPanel) showAddStatusDialog() {
+	if p.window == nil {
+		return
+	}
+
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("Status name (e.g. Session Replay)")
+
+	rulesBox := container.NewVBox()
+	var rows []*ruleRow
+
+	addRow := func() {
+		row := newRuleRow(nil)
+		rows = append(rows, row)
+		rulesBox.Add(row.box)
+		rulesBox.Refresh()
+	}
+	addRow() // start with one row
+
+	addRuleBtn := widget.NewButtonWithIcon("Add rule", theme.ContentAddIcon(), addRow)
+
+	hint := widget.NewLabel("Each rule: when a log line contains the substring,\nthe badge switches to that label + color.")
+	hint.Wrapping = fyne.TextWrapWord
+
+	form := container.NewVBox(
+		widget.NewLabel("Name:"),
+		nameEntry,
+		widget.NewLabel("Rules:"),
+		container.NewVScroll(rulesBox),
+		addRuleBtn,
+		hint,
+	)
+
+	d := dialog.NewCustomConfirm("Add status", "Add", "Cancel", form, func(ok bool) {
+		if !ok {
+			return
+		}
+		name := nameEntry.Text
+		if name == "" {
+			name = "status"
+		}
+		var rules []status.Rule
+		for _, row := range rows {
+			r := row.toRule()
+			if r.Pattern != "" && r.Label != "" {
+				rules = append(rules, r)
+			}
+		}
+		if len(rules) == 0 {
+			dialog.ShowError(fmt.Errorf("add at least one rule with pattern and label"), p.window)
+			return
+		}
+
+		var pl *status.Plugin
+		var err error
+		pl, err = status.New(name, rules, func() {
+			p.registry.Remove(pl)
+			fyne.Do(func() { p.rebuild() })
+		})
+		if err != nil {
+			dialog.ShowError(err, p.window)
+			return
+		}
+		p.registry.Add(pl)
+	}, p.window)
+	d.Resize(fyne.NewSize(560, 420))
 	d.Show()
 }
 
