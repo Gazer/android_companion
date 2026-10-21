@@ -271,30 +271,41 @@ func (p *PluginsPanel) showAddStatusDialog() {
 
 	rulesBox := container.NewVBox()
 	var rows []*ruleRow
+	var dlg dialog.Dialog
 
 	addRow := func() {
 		row := newRuleRow(nil)
 		rows = append(rows, row)
 		rulesBox.Add(row.box)
 		rulesBox.Refresh()
+		// Grow the dialog so the new row is visible
+		if dlg != nil {
+			sz := dlg.MinSize()
+			dlg.Resize(fyne.NewSize(sz.Width, sz.Height+44))
+		}
 	}
 	addRow() // start with one row
 
 	addRuleBtn := widget.NewButtonWithIcon("Add rule", theme.ContentAddIcon(), addRow)
 
-	hint := widget.NewLabel("Each rule: when a log line contains the substring,\nthe badge switches to that label + color.")
+	hint := widget.NewLabel("Each rule: when a log line matches the pattern, the badge\nswitches to that label + color.\nPatterns support {%d} {%f} {%s} captures; use $0, $1... in the label\nto show captured values.")
 	hint.Wrapping = fyne.TextWrapWord
+
+	// Fixed-height scroll area for rules so rows are always visible.
+	rulesScroll := container.NewVScroll(rulesBox)
+	rulesScroll.SetMinSize(fyne.NewSize(520, 160))
 
 	form := container.NewVBox(
 		widget.NewLabel("Name:"),
 		nameEntry,
 		widget.NewLabel("Rules:"),
-		container.NewVScroll(rulesBox),
+		rulesScroll,
 		addRuleBtn,
 		hint,
 	)
 
 	d := dialog.NewCustomConfirm("Add status", "Add", "Cancel", form, func(ok bool) {
+		dlg = nil
 		if !ok {
 			return
 		}
@@ -326,7 +337,8 @@ func (p *PluginsPanel) showAddStatusDialog() {
 		}
 		p.registry.Add(pl)
 	}, p.window)
-	d.Resize(fyne.NewSize(560, 420))
+	dlg = d
+	d.Resize(fyne.NewSize(580, 400))
 	d.Show()
 }
 

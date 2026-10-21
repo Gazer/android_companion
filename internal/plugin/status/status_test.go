@@ -80,6 +80,56 @@ func TestStatusPluginValidation(t *testing.T) {
 	}
 }
 
+func TestInterpolate(t *testing.T) {
+	tests := []struct {
+		label    string
+		captures []string
+		want     string
+	}{
+		{"Screen: $0", []string{"3"}, "Screen: 3"},
+		{"Session $0 on screen $1", []string{"42", "7"}, "Session 42 on screen 7"},
+		{"$1-$0", []string{"a", "b"}, "b-a"},
+		{"no refs", []string{"x"}, "no refs"},
+		{"$5 unknown", []string{"x"}, "$5 unknown"}, // out of range stays as-is
+		{"$0", nil, "$0"},                           // no captures
+	}
+	for _, tt := range tests {
+		if got := Interpolate(tt.label, tt.captures); got != tt.want {
+			t.Errorf("Interpolate(%q, %v) = %q, want %q", tt.label, tt.captures, got, tt.want)
+		}
+	}
+}
+
+func TestStatusPluginWithCaptures(t *testing.T) {
+	test.NewApp()
+
+	rules := []Rule{
+		{Pattern: "Updated state: sessionId = {%d}, screenNumber = {%d}", Label: "Screen: $1", Color: "#4CAF50"},
+	}
+	p, err := New("state", rules, func() {})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	p.ProcessLine(logcat.Entry{Message: "Updated state: sessionId = 42, screenNumber = 3"})
+	if p.active != 0 {
+		t.Fatalf("active = %d, want 0", p.active)
+	}
+	if len(p.captures) != 2 || p.captures[0] != "42" || p.captures[1] != "3" {
+		t.Errorf("captures = %v, want [42 3]", p.captures)
+	}
+	// Label after interpolation
+	if got := Interpolate(rules[0].Label, p.captures); got != "Screen: 3" {
+		t.Errorf("label = %q, want %q", got, "Screen: 3")
+	}
+
+	// Same rule, different captures -> still triggers a change
+	p.ProcessLine(logcat.Entry{Message: "Updated state: sessionId = 42, screenNumber = 9"})
+	if p.captures[1] != "9" {
+		t.Errorf("captures not updated: %v", p.captures)
+	}
+}
+
 func TestContrastColor(t *testing.T) {
 	white, _ := ParseHexColor("#FFFFFF")
 	black, _ := ParseHexColor("#000000")

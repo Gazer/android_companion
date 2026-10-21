@@ -7,7 +7,6 @@ import (
 	"image/color"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/rmarkiewicz/android-companion/internal/logcat"
+	"github.com/rmarkiewicz/android-companion/internal/plugin"
 )
 
 const (
@@ -51,40 +51,15 @@ type Plugin struct {
 	onClose     func()
 }
 
-// CompilePattern converts a user pattern with {%d} or {%f} placeholders
-// into a regex. Example: "sr_perf_01={%d}ms" -> `sr_perf_01=(\d+)ms`.
-// Everything else is quoted literally.
+// CompilePattern is kept for backward compatibility; use
+// plugin.CompilePattern instead.
 func CompilePattern(pattern string) (*regexp.Regexp, error) {
-	var b strings.Builder
-	remaining := pattern
-	for {
-		i := strings.Index(remaining, "{%")
-		if i < 0 {
-			b.WriteString(regexp.QuoteMeta(remaining))
-			break
-		}
-		b.WriteString(regexp.QuoteMeta(remaining[:i]))
-		j := strings.Index(remaining[i:], "}")
-		if j < 0 {
-			return nil, fmt.Errorf("unclosed placeholder in pattern")
-		}
-		ph := remaining[i+2 : i+j]
-		switch ph {
-		case "d":
-			b.WriteString(`(\d+)`)
-		case "f":
-			b.WriteString(`(\d+(?:\.\d+)?)`)
-		default:
-			return nil, fmt.Errorf("unknown placeholder {%%%s}, use {%%d} or {%%f}", ph)
-		}
-		remaining = remaining[i+j+1:]
-	}
-	return regexp.Compile(b.String())
+	return plugin.CompilePattern(pattern)
 }
 
 // New creates a chart plugin. onClose is called when the user closes it.
 func New(name, pattern string, onClose func()) (*Plugin, error) {
-	re, err := CompilePattern(pattern)
+	re, err := plugin.CompilePattern(pattern)
 	if err != nil {
 		return nil, err
 	}

@@ -4,10 +4,48 @@
 package plugin
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
+
 	"fyne.io/fyne/v2"
 
 	"github.com/rmarkiewicz/android-companion/internal/logcat"
 )
+
+// CompilePattern converts a user pattern with {%d} or {%f} placeholders
+// into a regex with one capture group per placeholder.
+// Example: "sr_perf_01={%d}ms" -> `sr_perf_01=(\d+)ms`.
+// Everything else is quoted literally.
+func CompilePattern(pattern string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	remaining := pattern
+	for {
+		i := strings.Index(remaining, "{%")
+		if i < 0 {
+			b.WriteString(regexp.QuoteMeta(remaining))
+			break
+		}
+		b.WriteString(regexp.QuoteMeta(remaining[:i]))
+		j := strings.Index(remaining[i:], "}")
+		if j < 0 {
+			return nil, fmt.Errorf("unclosed placeholder in pattern")
+		}
+		ph := remaining[i+2 : i+j]
+		switch ph {
+		case "d":
+			b.WriteString(`(\d+)`)
+		case "f":
+			b.WriteString(`(\d+(?:\.\d+)?)`)
+		case "s":
+			b.WriteString(`(\S+)`)
+		default:
+			return nil, fmt.Errorf("unknown placeholder {%%%s}, use {%%d}, {%%f} or {%%s}", ph)
+		}
+		remaining = remaining[i+j+1:]
+	}
+	return regexp.Compile(b.String())
+}
 
 // Plugin processes logcat lines and renders a widget.
 type Plugin interface {

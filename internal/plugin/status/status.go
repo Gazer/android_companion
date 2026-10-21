@@ -6,6 +6,8 @@ package status
 import (
 	"fmt"
 	"image/color"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -16,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/rmarkiewicz/android-companion/internal/logcat"
+	"github.com/rmarkiewicz/android-companion/internal/plugin"
 )
 
 // Rule is one state mapping: when Pattern matches a log line, the state
@@ -30,9 +33,11 @@ type Rule struct {
 type Plugin struct {
 	name  string
 	rules []Rule
+	res   []*regexp.Regexp // compiled patterns, parallel to rules
 
 	mu     sync.RWMutex
-	active int // index of the currently active rule, -1 = none
+	active int    // index of the currently active rule, -1 = none
+	captures []string // capture groups from the line that set the state
 
 	// UI
 	badge     *canvas.Rectangle
@@ -43,10 +48,15 @@ type Plugin struct {
 
 // New creates a status plugin. rules are evaluated in order; the last
 // matching rule in the stream defines the current state.
+//
+// Patterns support {%d} / {%f} capture placeholders (same syntax as the
+// chart plugin). Captured values can be interpolated into the label with
+// $0, $1, ... where $N is the Nth placeholder of the matching rule.
 func New(name string, rules []Rule, onClose func()) (*Plugin, error) {
 	if len(rules) == 0 {
 		return nil, fmt.Errorf("at least one rule is required")
 	}
+	res := make([]*regexp.Regexp, len(rules))
 	for i, r := range rules {
 		if r.Pattern == "" || r.Label == "" {
 			return nil, fmt.Errorf("rule %d: pattern and label are required", i+1)
@@ -54,11 +64,17 @@ func New(name string, rules []Rule, onClose func()) (*Plugin, error) {
 		if _, err := ParseHexColor(r.Color); err != nil {
 			return nil, fmt.Errorf("rule %d: %v", i+1, err)
 		}
+		re, err := plugin.CompilePattern(r.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d: %v", i+1, err)
+		}
+		res[i] = re
 	}
 
 	p := &Plugin{
 		name:    name,
 		rules:   rules,
+		res:     res,
 		active:  -1,
 		onClose: onClose,
 	}
@@ -107,7 +123,7 @@ func (p *Plugin) Widget() fyne.CanvasObject { return p.container }
 func (p *Plugin) Close() {}
 
 // ProcessLine implements plugin.Plugin. The last matching rule in the
-// stream defines the current state.
+// stream defines the current state; its captures interpolate into the label.
 func (p *Plugin) ProcessLine(e logcat.Entry) {
 	text := e.Message
 	if text == "" {
@@ -116,15 +132,17 @@ func (p *Plugin) ProcessLine(e logcat.Entry) {
 
 	p.mu.Lock()
 	changed := false
-	for i, r := range p.rules {
-		if strings.Contains(text, r.Pattern) {
-			if p.active != i {
+	for i, re := range p.res {
+		if m := re.FindStringSubmatch(text); m != nil {
+			if p.active != i || !equalStrings(p.captures, m[1:]) {
 				p.active = i
+				p.captures = m[1:]
 				changed = true
 			}
 		}
 	}
 	active := p.active
+	captures := p.captures
 	p.mu.Unlock()
 
 	if !changed {
@@ -136,14 +154,40 @@ func (p *Plugin) ProcessLine(e logcat.Entry) {
 	if err != nil {
 		col = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
 	}
+	label := Interpolate(rule.Label, captures)
 
 	fyne.Do(func() {
 		p.badge.FillColor = col
 		p.badge.Refresh()
-		p.label.Text = rule.Label
+		p.label.Text = label
 		p.label.Color = contrastColor(col)
 		p.label.Refresh()
 	})
+}
+
+// Interpolate replaces $0, $1, ... in label with the captured values.
+func Interpolate(label string, captures []string) string {
+	return labelRefRe.ReplaceAllStringFunc(label, func(ref string) string {
+		n, err := strconv.Atoi(ref[1:])
+		if err != nil || n < 0 || n >= len(captures) {
+			return ref // leave unknown refs as-is
+		}
+		return captures[n]
+	})
+}
+
+var labelRefRe = regexp.MustCompile(`\$(\d+)`)
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseHexColor parses "#RGB", "#RRGGBB" or "#RRGGBBAA".
