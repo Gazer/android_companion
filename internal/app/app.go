@@ -16,6 +16,7 @@ import (
 	"github.com/rmarkiewicz/android-companion/internal/avd"
 	"github.com/rmarkiewicz/android-companion/internal/emulator"
 	"github.com/rmarkiewicz/android-companion/internal/logcat"
+	"github.com/rmarkiewicz/android-companion/internal/plugin"
 	"github.com/rmarkiewicz/android-companion/internal/ui"
 )
 
@@ -44,8 +45,11 @@ func Run(parentCtx context.Context, cfg Config) error {
 	// We create it without adb/serial for now; it's wired up after launch.
 	logStore := logcat.NewStore("", "")
 
-	mw := ui.NewMainWindow(win, logStore)
-	sess := &session{cfg: cfg, mgr: mgr, mw: mw, logStore: logStore}
+	// Plugin registry: receives every log line, renders widgets.
+	registry := plugin.NewRegistry()
+
+	mw := ui.NewMainWindow(win, logStore, registry)
+	sess := &session{cfg: cfg, mgr: mgr, mw: mw, logStore: logStore, registry: registry}
 
 	// Wire picker selection to launch
 	mw.Picker().SetOnSelect(func(name string) {
@@ -99,6 +103,7 @@ type session struct {
 	mgr      *avd.Manager
 	mw       *ui.MainWindow
 	logStore *logcat.Store
+	registry *plugin.Registry
 
 	mu        sync.Mutex
 	running   bool
@@ -207,10 +212,11 @@ func (s *session) launchAsync(parent context.Context, name string) {
 			})
 		}()
 
-		// Pump logs into the store (no UI update per log!)
+		// Pump logs into the store and dispatch to plugins (no UI update per log!)
 		go func() {
 			for e := range logCh {
 				s.logStore.Add(e)
+				s.registry.ProcessLine(e)
 			}
 		}()
 
