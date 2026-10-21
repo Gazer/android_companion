@@ -1,0 +1,165 @@
+// Package logcat streams and parses `adb logcat` output from a device.
+package logcat
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strings"
+	"sync"
+)
+
+// Entry is a single parsed logcat line.
+type Entry struct {
+	Raw     string
+	Time    string
+	PID     string
+	TID     string
+	Level   string // V, D, I, W, E, F
+	Tag     string
+	Message string
+}
+
+var (
+	// Matches the "threadtime" format: "MM-DD HH:MM:SS.mmm  PID  TID L TAG: message"
+	// Note: after "TAG:" we strip at most ONE separating space so the
+	// original message indentation (multi-line logs) is preserved.
+	reThreadTime = regexp.MustCompile(`^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+?): ?(.*)$`)
+	// Fallback for lines that don't parse (e.g. beginning of logs markers)
+	reLoose = regexp.MustCompile(`^(\S+\s+\S+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.*)$`)
+)
+
+// Streamer tails logcat and delivers parsed entries.
+type Streamer struct {
+	AdbPath string
+	Serial  string
+
+	mu      sync.RWMutex
+	entries []Entry
+	subs    []chan Entry
+	cmd     *exec.Cmd
+}
+
+// NewStreamer creates a streamer for the given adb serial.
+func NewStreamer(adbPath, serial string) *Streamer {
+	return &Streamer{AdbPath: adbPath, Serial: serial}
+}
+
+// Start begins streaming logcat in the background.
+// Returned channel receives new entries; close ctx to stop.
+func (s *Streamer) Start(ctx context.Context) (<-chan Entry, error) {
+	// threadtime format. -T 0 means "only logs from now", not the whole
+	// boot backlog. This avoids flooding the UI with thousands of old lines.
+	args := []string{
+		"-s", s.Serial,
+		"logcat",
+		"-v", "threadtime",
+		"-T", "0",
+	}
+	s.cmd = exec.CommandContext(ctx, s.AdbPath, args...)
+	stdout, err := s.cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("logcat stdout pipe: %w", err)
+	}
+	if err := s.cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start logcat: %w", err)
+	}
+
+	out := make(chan Entry, 4096)
+	s.addSub(out)
+
+	go func() {
+		defer s.cmd.Wait()
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			e := ParseLine(line)
+			s.append(e)
+			s.broadcast(e)
+		}
+	}()
+
+	return out, nil
+}
+
+// Stop terminates logcat.
+func (s *Streamer) Stop() {
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
+}
+
+// Snapshot returns a copy of all entries so far.
+func (s *Streamer) Snapshot() []Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cp := make([]Entry, len(s.entries))
+	copy(cp, s.entries)
+	return cp
+}
+
+// Filter returns entries whose Raw matches the predicate.
+func Filter(entries []Entry, substr string) []Entry {
+	if substr == "" {
+		return entries
+	}
+	sub := strings.ToLower(substr)
+	out := entries[:0]
+	for _, e := range entries {
+		if strings.Contains(strings.ToLower(e.Raw), sub) ||
+			strings.Contains(strings.ToLower(e.Tag), sub) ||
+			strings.Contains(strings.ToLower(e.Message), sub) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ParseLine converts one logcat line into an Entry.
+func ParseLine(line string) Entry {
+	e := Entry{Raw: line}
+	if m := reThreadTime.FindStringSubmatch(line); m != nil {
+		e.Time, e.PID, e.TID, e.Level, e.Tag, e.Message = m[1], m[2], m[3], m[4], strings.TrimSpace(m[5]), m[6]
+		return e
+	}
+	if m := reLoose.FindStringSubmatch(line); m != nil {
+		e.Time, e.PID, e.TID, e.Level = m[1], m[2], m[3], m[4]
+		rest := m[5]
+		if idx := strings.Index(rest, ":"); idx > 0 {
+			e.Tag = strings.TrimSpace(rest[:idx])
+			e.Message = strings.TrimPrefix(rest[idx+1:], " ")
+		} else {
+			e.Message = rest
+		}
+		return e
+	}
+	// Unparsed: keep raw as message
+	e.Message = line
+	return e
+}
+
+func (s *Streamer) append(e Entry) {
+	s.mu.Lock()
+	s.entries = append(s.entries, e)
+	s.mu.Unlock()
+}
+
+func (s *Streamer) addSub(ch chan Entry) {
+	s.mu.Lock()
+	s.subs = append(s.subs, ch)
+	s.mu.Unlock()
+}
+
+func (s *Streamer) broadcast(e Entry) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, ch := range s.subs {
+		select {
+		case ch <- e:
+		default: // drop if consumer is slow; snapshot is source of truth
+		}
+	}
+}

@@ -1,0 +1,19 @@
+# Binaries
+/android-companion
+/android-companion.exe
+/android-companion-*
+
+# Go
+*.test
+*.out
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
