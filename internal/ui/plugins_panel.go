@@ -12,11 +12,13 @@ import (
 
 	"github.com/rmarkiewicz/android-companion/internal/plugin"
 	"github.com/rmarkiewicz/android-companion/internal/plugin/chart"
+	"github.com/rmarkiewicz/android-companion/internal/plugin/counter"
 	"github.com/rmarkiewicz/android-companion/internal/plugin/status"
 )
 
 // PluginsPanel is the right-side column holding active plugin widgets,
-// with "Add chart" / "Add status" buttons and per-widget close buttons.
+// with an "Add" menu (chart, status, counter) and per-widget edit and
+// close buttons.
 type PluginsPanel struct {
 	widget.BaseWidget
 
@@ -27,6 +29,7 @@ type PluginsPanel struct {
 	scroll  *container.Scroll
 	empty   *widget.Label
 	content *fyne.Container
+	addMenu *fyne.Menu
 
 	// restoring is true while loadSaved runs: Add() fires during restore,
 	// and we must not persist until everything is loaded (otherwise each
@@ -39,22 +42,27 @@ type PluginsPanel struct {
 func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 	p := &PluginsPanel{registry: reg}
 
-	p.empty = widget.NewLabel("No widgets yet.\nAdd a chart or a status.")
+	p.empty = widget.NewLabel("No widgets yet.\nAdd a chart, a status or a counter.")
 	p.empty.Alignment = fyne.TextAlignCenter
 	p.empty.Wrapping = fyne.TextWrapWord
 
 	p.vbox = container.NewVBox(p.empty)
 	p.scroll = container.NewVScroll(p.vbox)
 
-	addChartBtn := widget.NewButtonWithIcon("Add chart", theme.ContentAddIcon(), func() {
-		p.showChartDialog(nil)
-	})
-	addStatusBtn := widget.NewButtonWithIcon("Add status", theme.ContentAddIcon(), func() {
-		p.showStatusDialog(nil)
+	p.addMenu = fyne.NewMenu("",
+		fyne.NewMenuItem("Chart", func() { p.showChartDialog(nil) }),
+		fyne.NewMenuItem("Status", func() { p.showStatusDialog(nil) }),
+		fyne.NewMenuItem("Counter", func() { p.showCounterDialog(nil) }),
+	)
+	var addBtn *widget.Button
+	addBtn = widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), func() {
+		if c := fyne.CurrentApp().Driver().CanvasForObject(addBtn); c != nil {
+			widget.ShowPopUpMenuAtRelativePosition(p.addMenu, c, fyne.NewPos(0, addBtn.Size().Height), addBtn)
+		}
 	})
 
 	p.content = container.NewBorder(
-		container.NewHBox(addChartBtn, addStatusBtn),
+		container.NewHBox(addBtn),
 		nil, nil, nil,
 		p.scroll,
 	)
@@ -87,8 +95,14 @@ func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 func (p *PluginsPanel) save() {
 	var charts []plugin.ChartConfig
 	var statuses []plugin.StatusConfig
+	var counters []plugin.CounterConfig
 	for _, pl := range p.registry.Plugins() {
 		switch c := pl.(type) {
+		case *counter.Plugin:
+			counters = append(counters, plugin.CounterConfig{
+				Name:    c.Name(),
+				Pattern: c.Pattern(),
+			})
 		case *chart.Plugin:
 			charts = append(charts, plugin.ChartConfig{
 				Name:    c.Name(),
@@ -114,6 +128,9 @@ func (p *PluginsPanel) save() {
 	}
 	if err := plugin.SaveStatuses(statuses); err != nil {
 		fmt.Printf("[plugins] save statuses failed: %v\n", err)
+	}
+	if err := plugin.SaveCounters(counters); err != nil {
+		fmt.Printf("[plugins] save counters failed: %v\n", err)
 	}
 }
 
@@ -147,6 +164,27 @@ func (p *PluginsPanel) loadSaved() {
 			p.addStatus(pl)
 		}
 	}
+	if cfgs, err := plugin.LoadCounters(); err == nil {
+		for _, cfg := range cfgs {
+			pl, err := counter.New(cfg.Name, cfg.Pattern, nil)
+			if err != nil {
+				continue
+			}
+			p.addCounter(pl)
+		}
+	}
+}
+
+// addCounter wires the plugin's close/edit callbacks and registers it.
+func (p *PluginsPanel) addCounter(pl *counter.Plugin) {
+	pl.SetOnClose(func() {
+		p.registry.Remove(pl)
+		fyne.Do(func() { p.rebuild() })
+	})
+	pl.SetOnEdit(func() {
+		p.showCounterDialog(pl)
+	})
+	p.registry.Add(pl)
 }
 
 // addChart wires the plugin's close/edit callbacks and registers it.
@@ -398,6 +436,62 @@ func (p *PluginsPanel) showStatusDialog(existing *status.Plugin) {
 	}, p.window)
 	dlg = d
 	d.Resize(fyne.NewSize(580, 400))
+	d.Show()
+}
+
+// showCounterDialog opens the counter config dialog. If existing is
+// non-nil, the dialog is pre-filled and confirming replaces it (edit); the
+// count is kept if the pattern doesn't change.
+func (p *PluginsPanel) showCounterDialog(existing *counter.Plugin) {
+	if p.window == nil {
+		return
+	}
+
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("Counter name (e.g. Crashes)")
+	patternEntry := widget.NewEntry()
+	patternEntry.SetPlaceHolder("e.g. FATAL EXCEPTION")
+
+	title, confirm := "Add counter", "Add"
+	if existing != nil {
+		nameEntry.SetText(existing.Name())
+		patternEntry.SetText(existing.Pattern())
+		title, confirm = "Edit counter", "Save"
+	}
+
+	hint := widget.NewLabel("Counts the log lines that contain the pattern (case-sensitive).\n" +
+		"{%d} {%f} {%s} match any number / word.")
+
+	form := container.NewVBox(
+		widget.NewLabel("Name:"),
+		nameEntry,
+		widget.NewLabel("Pattern:"),
+		patternEntry,
+		hint,
+	)
+
+	d := dialog.NewCustomConfirm(title, confirm, "Cancel", form, func(ok bool) {
+		if !ok || patternEntry.Text == "" {
+			return
+		}
+		name := nameEntry.Text
+		if name == "" {
+			name = "counter"
+		}
+		pl, err := counter.New(name, patternEntry.Text, nil)
+		if err != nil {
+			dialog.ShowError(err, p.window)
+			return
+		}
+		if existing != nil {
+			if existing.Pattern() == pl.Pattern() {
+				pl.SetCount(existing.Count())
+			}
+			p.registry.Remove(existing)
+		}
+		p.addCounter(pl)
+	}, p.window)
+	d.Resize(fyne.NewSize(500, 300))
 	d.Show()
 }
 

@@ -1,6 +1,6 @@
 # Android Companion
 
-A desktop app that launches an Android emulator **embedded inside the window**, or mirrors a **physical device over USB or Wi-Fi**, with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges).
+A desktop app that launches an Android emulator **embedded inside the window**, or mirrors a **physical device over USB or Wi-Fi**, with a live **logcat** panel and a **plugin system** for log-driven widgets (line charts, status badges, counters).
 
 Built with **Go + Fyne**. Emulators use their **gRPC bridge** (the same mechanism Android Studio uses to embed the emulator); physical devices are mirrored with an embedded **[scrcpy](https://github.com/Genymobile/scrcpy) server**, decoded with **FFmpeg**.
 
@@ -36,7 +36,7 @@ Built with **Go + Fyne**. Emulators use their **gRPC bridge** (the same mechanis
 
 ### Plugins
 
-Widgets driven by log lines, in a collapsible right column. Add, edit and remove them; configs persist across restarts.
+Widgets driven by log lines, in a collapsible right column. Add them from the **Add** menu, edit and remove them; configs persist across restarts.
 
 **Line chart** — plot a value extracted from matching lines in real time:
 
@@ -59,6 +59,14 @@ Captured values can be shown in the label:
 pattern: buffering at {%d}%
 label:   Buffering $0%     -> badge shows "Buffering 42%"
 ```
+
+**Counter** — counts the log lines that contain a pattern, with a Reset button:
+
+```
+pattern: FATAL EXCEPTION   -> 3
+```
+
+The whole line is searched (tag included), case-sensitive; `{%d}` `{%f}` `{%s}` match any number / word. The count starts at 0 on every run.
 
 ## Install
 
@@ -115,7 +123,7 @@ go test ./...
 - `internal/avd` — SDK discovery, AVD list, emulator process
 - `internal/emulator` — gRPC client for the emulator controller
 - `internal/logcat` — `adb logcat` parser and in-memory store
-- `internal/plugin` — plugin interface, registry, pattern compiler, persistence (`chart`, `status`)
+- `internal/plugin` — plugin interface, registry, pattern compiler, persistence (`chart`, `status`, `counter`)
 - `internal/ui` — the widgets
 - `internal/app` — wiring and lifecycle
 

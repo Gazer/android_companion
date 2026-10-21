@@ -41,6 +41,31 @@ func TestSaveAndLoadCharts(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadCounters(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	home := filepath.Join(tmp, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	if loaded, err := LoadCounters(); err != nil || loaded != nil {
+		t.Fatalf("LoadCounters with no file = %v, %v; want nil, nil", loaded, err)
+	}
+	cfgs := []CounterConfig{{Name: "crashes", Pattern: "FATAL EXCEPTION"}}
+	if err := SaveCounters(cfgs); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCounters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || loaded[0] != cfgs[0] {
+		t.Fatalf("loaded %+v, want %+v", loaded, cfgs)
+	}
+}
+
 func TestLoadChartsMissingFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)

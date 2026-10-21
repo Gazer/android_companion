@@ -26,8 +26,17 @@ type StatusConfig struct {
 	Rules []StatusRule `json:"rules"`
 }
 
-// configFile is ~/.config/android-companion/charts.json (platform dir).
-func configFile() (string, error) {
+// CounterConfig is the persistable configuration of a counter plugin.
+// The count itself isn't saved: it starts at 0 on every run.
+type CounterConfig struct {
+	Name    string `json:"name"`
+	Pattern string `json:"pattern"`
+}
+
+// configPath returns the path of a config file in the app's config dir
+// (e.g. ~/Library/Application Support/android-companion/<name> on macOS,
+// ~/.config/android-companion/<name> on Linux), creating the dir.
+func configPath(name string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
@@ -36,8 +45,11 @@ func configFile() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "charts.json"), nil
+	return filepath.Join(dir, name), nil
 }
+
+// configFile is the persistence file for chart plugins.
+func configFile() (string, error) { return configPath("charts.json") }
 
 // SaveCharts writes the chart configs to disk. Missing dir is created.
 func SaveCharts(cfgs []ChartConfig) error {
@@ -77,17 +89,7 @@ func LoadCharts() ([]ChartConfig, error) {
 }
 
 // statusesFile is the persistence file for status plugins.
-func statusesFile() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	dir = filepath.Join(dir, "android-companion")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "statuses.json"), nil
-}
+func statusesFile() (string, error) { return configPath("statuses.json") }
 
 // SaveStatuses writes status configs to disk.
 func SaveStatuses(cfgs []StatusConfig) error {
@@ -119,6 +121,42 @@ func LoadStatuses() ([]StatusConfig, error) {
 		return nil, err
 	}
 	var cfgs []StatusConfig
+	if err := json.Unmarshal(data, &cfgs); err != nil {
+		return nil, err
+	}
+	return cfgs, nil
+}
+
+// SaveCounters writes counter configs to disk.
+func SaveCounters(cfgs []CounterConfig) error {
+	path, err := configPath("counters.json")
+	if err != nil {
+		return err
+	}
+	if cfgs == nil {
+		cfgs = []CounterConfig{} // write [] instead of null
+	}
+	data, err := json.MarshalIndent(cfgs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// LoadCounters reads saved counter configs. Nil if the file is missing.
+func LoadCounters() ([]CounterConfig, error) {
+	path, err := configPath("counters.json")
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var cfgs []CounterConfig
 	if err := json.Unmarshal(data, &cfgs); err != nil {
 		return nil, err
 	}
