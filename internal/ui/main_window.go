@@ -81,7 +81,7 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 
 	// HSplit: left = picker/emulator, right = logcat+plugins
 	mw.split = container.NewHSplit(mw.leftContent, rightWithToggle)
-	mw.split.SetOffset(0.45)
+	mw.split.SetOffset(0.2)
 
 	win.SetContent(mw.split)
 	win.Resize(fyne.NewSize(1400, 800))
