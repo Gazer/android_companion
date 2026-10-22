@@ -10,6 +10,8 @@ import (
 
 	"github.com/rmarkiewicz/android-companion/internal/logcat"
 	"github.com/rmarkiewicz/android-companion/internal/plugin"
+
+	"github.com/fyne-io/terminal"
 )
 
 // MainWindow holds the top-level UI: emulator/device | logcat | plugins.
@@ -49,8 +51,20 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 	mw.toggleBtn = widget.NewButtonWithIcon("", theme.NavigateNextIcon(), mw.togglePlugins)
 	mw.toggleBtn.Importance = widget.LowImportance
 
+	term := terminal.New()
+	go func() {
+		for true {
+			_ = term.RunLocalShell()
+		}
+	}()
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Logcat", mw.logcat.Content()),
+		container.NewTabItem("Terminal", term),
+	)
+
 	// Right side: logcat + (optional) plugins column
-	rightSplit := container.NewHSplit(mw.logcat.Content(), mw.plugins.Content())
+	rightSplit := container.NewHSplit(tabs, mw.plugins.Content())
 	rightSplit.SetOffset(0.7)
 	mw.rightSplit = rightSplit
 
