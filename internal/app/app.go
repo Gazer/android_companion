@@ -75,6 +75,10 @@ func Run(parentCtx context.Context, cfg Config) error {
 			Connect: func(addr string) error { return sess.connect(ctx, addr) },
 		})
 	})
+	mw.Picker().SetOnRefresh(func() {
+		go sess.loadAVDs(ctx)
+		sess.pokeDevices()
+	})
 	mw.SetOnDisconnect(func() {
 		go sess.stop("")
 	})

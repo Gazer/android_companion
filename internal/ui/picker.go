@@ -50,8 +50,9 @@ type PickerPanel struct {
 	devicesNote, avdsNote string
 	rows                  []pickerRow
 
-	onSelect func(Target)
-	onWiFi   func()
+	onSelect  func(Target)
+	onWiFi    func()
+	onRefresh func()
 
 	status  *widget.Label
 	list    *widget.List
@@ -107,9 +108,14 @@ func NewPickerPanel(onSelect func(Target)) *PickerPanel {
 			p.onWiFi()
 		}
 	})
+	refresh := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
+		if p.onRefresh != nil {
+			p.onRefresh()
+		}
+	})
 	footer := container.NewVBox(
 		p.status,
-		container.NewHBox(layout.NewSpacer(), wifi, layout.NewSpacer()),
+		container.NewHBox(layout.NewSpacer(), wifi, refresh, layout.NewSpacer()),
 	)
 	p.content = container.NewBorder(container.NewVBox(title, subtitle), footer, nil, nil, p.list)
 
@@ -207,6 +213,11 @@ func (p *PickerPanel) SetOnSelect(f func(Target)) {
 // SetOnWiFi sets the action of the "Pair device over Wi-Fi" button.
 func (p *PickerPanel) SetOnWiFi(f func()) {
 	p.onWiFi = f
+}
+
+// SetOnRefresh sets the action of the refresh button.
+func (p *PickerPanel) SetOnRefresh(f func()) {
+	p.onRefresh = f
 }
 
 // SetStatus shows a status message.
