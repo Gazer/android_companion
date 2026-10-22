@@ -172,6 +172,10 @@ func (p *LogcatPanel) Content() fyne.CanvasObject {
 	return container.NewBorder(header, footer, nil, nil, p.listArea)
 }
 
+func (p *LogcatPanel) FocusPoint() fyne.Focusable {
+	return p.filterEntry
+}
+
 // SetWindow wires the parent window for the package filter dialog.
 func (p *LogcatPanel) SetWindow(w fyne.Window) {
 	p.packageFilter.SetWindow(w)

@@ -62,6 +62,14 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 		container.NewTabItem("Logcat", mw.logcat.Content()),
 		container.NewTabItem("Terminal", term),
 	)
+	tabs.OnSelected = func(ti *container.TabItem) {
+		if ti.Text == "Terminal" {
+			win.Canvas().Focus(term)
+		}
+		if ti.Text == "Logcat" {
+			win.Canvas().Focus(mw.logcat.FocusPoint())
+		}
+	}
 
 	// Right side: logcat + (optional) plugins column
 	rightSplit := container.NewHSplit(tabs, mw.plugins.Content())
