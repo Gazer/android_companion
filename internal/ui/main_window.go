@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -52,6 +53,11 @@ func NewMainWindow(win fyne.Window, store *logcat.Store, registry *plugin.Regist
 	mw.toggleBtn.Importance = widget.LowImportance
 
 	term := terminal.New()
+	dir, err := os.Getwd()
+	if err == nil {
+		term.SetStartDir(dir)
+	}
+
 	go func() {
 		for true {
 			_ = term.RunLocalShell()
