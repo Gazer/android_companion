@@ -102,9 +102,12 @@ func New(name string, rules []Rule, onClose func()) (*Plugin, error) {
 	})
 	p.editBtn.Importance = widget.LowImportance
 
+	resetBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), p.Reset)
+	resetBtn.Importance = widget.LowImportance
+
 	header := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(p.editBtn, closeBtn),
+		container.NewHBox(resetBtn, p.editBtn, closeBtn),
 	)
 
 	badgeBox := container.NewGridWrap(fyne.NewSize(300, 48),
@@ -123,6 +126,21 @@ func (p *Plugin) Rules() []Rule {
 	cp := make([]Rule, len(p.rules))
 	copy(cp, p.rules)
 	return cp
+}
+
+// Reset clears the active state, going back to "(no state)". Call it from
+// the UI goroutine.
+func (p *Plugin) Reset() {
+	p.mu.Lock()
+	p.active = -1
+	p.captures = nil
+	p.mu.Unlock()
+
+	p.badge.FillColor = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
+	p.badge.Refresh()
+	p.label.Text = "(no state)"
+	p.label.Color = color.NRGBA{R: 140, G: 140, B: 140, A: 255}
+	p.label.Refresh()
 }
 
 // SetOnEdit sets the callback for the edit (pencil) button.

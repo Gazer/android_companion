@@ -47,7 +47,10 @@ func NewPluginsPanel(reg *plugin.Registry) *PluginsPanel {
 	p.empty.Wrapping = fyne.TextWrapWord
 
 	p.vbox = container.NewVBox(p.empty)
-	p.scroll = container.NewVScroll(p.vbox)
+	// NewScroll (not NewVScroll): VScroll would inherit the content's min width
+	// and force the whole window to stay wide. Both-direction scroll keeps the
+	// min size small so the window can be tiled to a portion of the screen.
+	p.scroll = container.NewScroll(p.vbox)
 
 	p.addMenu = fyne.NewMenu("",
 		fyne.NewMenuItem("Chart", func() { p.showChartDialog(nil) }),

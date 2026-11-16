@@ -91,9 +91,12 @@ func New(name, pattern string, onClose func()) (*Plugin, error) {
 	})
 	p.editBtn.Importance = widget.LowImportance
 
+	resetBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), p.Reset)
+	resetBtn.Importance = widget.LowImportance
+
 	header := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(p.editBtn, closeBtn),
+		container.NewHBox(resetBtn, p.editBtn, closeBtn),
 	)
 
 	body := container.NewBorder(nil, p.label, nil, nil,
@@ -109,6 +112,17 @@ func (p *Plugin) Name() string { return p.name }
 
 // Pattern returns the user pattern used to create this chart (for persistence).
 func (p *Plugin) Pattern() string { return p.pattern }
+
+// Reset discards all collected points, leaving the chart empty. Call it
+// from the UI goroutine.
+func (p *Plugin) Reset() {
+	p.mu.Lock()
+	p.points = nil
+	p.mu.Unlock()
+
+	p.label.SetText("no data")
+	p.chartWidget.Refresh()
+}
 
 // SetOnEdit sets the callback for the edit (pencil) button.
 func (p *Plugin) SetOnEdit(f func()) { p.onEdit = f }

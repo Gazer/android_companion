@@ -155,9 +155,10 @@ func (w *ScreenWidget) Clear() {
 	w.img.Refresh()
 }
 
-// MinSize returns a reasonable default size.
+// MinSize is kept small so the window can be tiled to a fraction of the
+// screen (AeroSpace). The image scales down to fit whatever space it gets.
 func (w *ScreenWidget) MinSize() fyne.Size {
-	return fyne.NewSize(360, 640)
+	return fyne.NewSize(200, 300)
 }
 
 // CreateRenderer builds the renderer with the image.

@@ -67,7 +67,8 @@ func New(name, pattern string, onClose func()) (*Plugin, error) {
 	patternLabel.SizeName = theme.SizeNameCaptionText
 	patternLabel.Truncation = fyne.TextTruncateEllipsis
 
-	p.resetBtn = widget.NewButtonWithIcon("Reset", theme.ViewRefreshIcon(), p.Reset)
+	p.resetBtn = widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), p.Reset)
+	p.resetBtn.Importance = widget.LowImportance
 
 	closeBtn := widget.NewButtonWithIcon("", theme.CancelIcon(), func() {
 		if p.onClose != nil {
@@ -84,9 +85,9 @@ func New(name, pattern string, onClose func()) (*Plugin, error) {
 
 	header := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(editBtn, closeBtn),
+		container.NewHBox(p.resetBtn, editBtn, closeBtn),
 	)
-	body := container.NewBorder(nil, nil, nil, container.NewCenter(p.resetBtn),
+	body := container.NewBorder(nil, nil, nil, nil,
 		container.NewVBox(container.NewPadded(p.countText), patternLabel),
 	)
 
